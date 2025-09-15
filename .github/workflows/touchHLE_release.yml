@@ -2,7 +2,7 @@ name: Build touchHLE
 
 on:
   push:
-    branches: [ "patch-5" ]
+    branches: [ "patch-11" ]
   pull_request:
     branches: [ "Unofficial-Stole-Code" ]
 
