@@ -41,7 +41,7 @@ pub enum DeviceOrientation {
 fn size_for_orientation(orientation: DeviceOrientation, scale_hack: NonZeroU32) -> (u32, u32) {
     let scale_hack = scale_hack.get();
     match orientation {
-        DeviceOrientation::Portrait => (320 * scale_hack, 480 * scale_hack),
+        DeviceOrientation::Portrait => (156 * scale_hack, 43 * scale_hack),
         DeviceOrientation::LandscapeLeft => (156 * scale_hack, 43 * scale_hack),
         DeviceOrientation::LandscapeRight => (156 * scale_hack, 43 * scale_hack),
     }
