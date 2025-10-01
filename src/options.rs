@@ -53,6 +53,7 @@ pub struct Options {
     pub force_composition: bool,
     pub network_access: bool,
     pub popup_errors: bool,
+    pub ignore_gl_errors: bool,
 }
 
 impl Default for Options {
@@ -78,6 +79,7 @@ impl Default for Options {
             force_composition: false,
             network_access: false,
             popup_errors: true,
+            ignore_gl_errors: false,
         }
     }
 }
@@ -201,6 +203,8 @@ impl Options {
             self.network_access = true;
         } else if arg == "--no-error-popup" {
             self.popup_errors = false;
+        } else if arg == "--ignore-gl-errors" {
+            self.ignore_gl_errors = true;
         } else {
             return Ok(false);
         };
