@@ -158,3 +158,6 @@ com.gameloft.BubbleBash: --force-composition --ignore-gl-errors
 # Driver/Free
 com.gameloft.DriverFree: --force-composition --ignore-gl-errors
 com.gameloft.Driver: --ignore-gl-errors
+
+# Cro-Mag Rally
+com.pangea.cromag: --ignore-gl-errors
