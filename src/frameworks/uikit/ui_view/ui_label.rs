@@ -152,7 +152,13 @@ pub const CLASSES: ClassExports = objc_classes! {
     release(env, old_font);
 
     () = msg![env; this setNeedsDisplay];
+- (bool)adjustsFontSizeToFitWidth {
+    false // default value
 }
+- (())setAdjustsFontSizeToFitWidth:(bool)adjusts {
+    assert!(!adjusts); // TODO
+}
+
 
 - (id)shadowOffset {
     nil
