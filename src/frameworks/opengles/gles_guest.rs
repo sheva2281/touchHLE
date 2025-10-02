@@ -144,15 +144,10 @@ fn glGetError(env: &mut Environment) -> GLenum {
         let err = unsafe { gles.GetError() };
         if err != 0 {
             if ignore_gl_errors {
-147	+
                 log_once!(
-148	+
                     "Warning: Guest error reporting is ignored for glGetError(), returning 0."
-149	+
                 );
-150	+
                 return 0;
-151	+
             }
             log!("Warning: glGetError() returned {:#x}", err);
         }
