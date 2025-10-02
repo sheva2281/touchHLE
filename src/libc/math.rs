@@ -396,13 +396,9 @@ fn truncf(_env: &mut Environment, arg: f32) -> f32 {
     arg.trunc()
 }
 fn modf(env: &mut Environment, val: f64, iptr: MutPtr<f64>) -> f64 {
-407	+
     let ivalue = trunc(env, val);
-408	+
     env.mem.write(iptr, ivalue);
-409	+
     val - ivalue
-410	+
 }
 fn modff(env: &mut Environment, val: f32, iptr: MutPtr<f32>) -> f32 {
     let ivalue = truncf(env, val);
