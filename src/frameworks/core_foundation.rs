@@ -22,6 +22,8 @@ pub mod cf_bundle;
 pub mod cf_data;
 pub mod cf_dictionary;
 pub mod cf_locale;
+pub mod cf_number;
+pub mod cf_preferences;
 pub mod cf_run_loop;
 pub mod cf_run_loop_timer;
 pub mod cf_socket;
@@ -35,6 +37,7 @@ pub use cf_type::{CFRelease, CFRetain, CFTypeRef};
 pub type CFHashCode = u32;
 pub type CFIndex = i32;
 pub type CFOptionFlags = u32;
+pub type CFComparisonResult = CFIndex;
 
 use crate::abi::GuestArg;
 use crate::impl_GuestRet_for_large_struct;

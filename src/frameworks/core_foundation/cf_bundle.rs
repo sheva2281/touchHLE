@@ -140,10 +140,16 @@ pub fn CFBundleCopyPreferredLocalizationsFromArray(
         }
     }
 
-    // Add the first element as fallback
-    let first_loc: id = msg![env; loc_array objectAtIndex: (0 as NSUInteger)];
-    result.push(first_loc);
-    retain(env, first_loc);
+    if loc_count > 0 {
+        // Add the first element as fallback
+        let first_loc: id = msg![env; loc_array objectAtIndex:(0 as NSUInteger)];
+        result.push(first_loc);
+        retain(env, first_loc);
+    } else {
+        // Behaviour was verified on macOS
+        let en_loc = ns_string::get_static_str(env, "en");
+        result.push(en_loc);
+    };
 
     let result = ns_array::from_vec(env, result);
     log_dbg!(
@@ -152,6 +158,17 @@ pub fn CFBundleCopyPreferredLocalizationsFromArray(
         result
     );
     result
+}
+
+fn CFBundleCopyLocalizedString(
+    env: &mut Environment,
+    bundle: CFBundleRef,
+    key: CFStringRef,
+    value: CFStringRef,
+    table_name: CFStringRef,
+) -> CFStringRef {
+    let res = msg![env; bundle localizedStringForKey:key value:value table:table_name];
+    msg![env; res copy]
 }
 
 pub const FUNCTIONS: FunctionExports = &[
@@ -163,4 +180,5 @@ pub const FUNCTIONS: FunctionExports = &[
     export_c_func!(CFBundleCopyResourceURL(_, _, _, _)),
     export_c_func!(CFBundleCopyBundleLocalizations(_)),
     export_c_func!(CFBundleCopyPreferredLocalizationsFromArray(_)),
+    export_c_func!(CFBundleCopyLocalizedString(_, _, _, _)),
 ];

@@ -28,7 +28,7 @@ use crate::frameworks::foundation::ns_string::get_static_str;
 use crate::frameworks::foundation::{ns_array, NSInteger, NSUInteger};
 use crate::objc::{
     autorelease, id, msg, msg_class, nil, objc_classes, release, retain, Class, ClassExports,
-    HostObject, NSZonePtr,
+    HostObject, NSZonePtr, ObjC,
 };
 use crate::Environment;
 
@@ -299,6 +299,27 @@ pub const CLASSES: ClassExports = objc_classes! {
     }
 }
 
+- (())insertSubview:(id)view atIndex:(NSInteger)index {
+    assert!(view != nil);
+    retain(env, view);
+    () = msg![env; view removeFromSuperview];
+
+    let subview_obj = env.objc.borrow_mut::<UIViewHostObject>(view);
+    subview_obj.superview = this;
+    let subview_layer = subview_obj.layer;
+
+    let &mut UIViewHostObject {
+        ref mut subviews,
+        layer: this_layer,
+        ..
+    } = env.objc.borrow_mut(this);
+
+    subviews.insert(index as usize, view);
+
+    assert!(index >= 0);
+    () = msg![env; this_layer insertSublayer:subview_layer atIndex:(index as u32)];
+}
+
 - (())insertSubview:(id)view belowSubview:(id)sibling {
     retain(env, view);
     () = msg![env; view removeFromSuperview];
@@ -346,6 +367,31 @@ pub const CLASSES: ClassExports = objc_classes! {
     let subview_layer = env.objc.borrow::<UIViewHostObject>(subview).layer;
     () = msg![env; subview_layer removeFromSuperlayer];
     () = msg![env; layer addSublayer:subview_layer];
+}
+
+- (())sendSubviewToBack:(id)subview {
+    if subview == nil {
+        log_dbg!("Tolerating [{:?} sendSubviewToBack:nil]", this);
+        return;
+    }
+
+    let &mut UIViewHostObject {
+        ref mut subviews,
+        layer,
+        ..
+    } = env.objc.borrow_mut(this);
+
+    let Some(idx) = subviews.iter().position(|&subview2| subview2 == subview) else {
+        log_dbg!("Warning: Unable to find the subview {:?} in subviews of {:?}", subview, this);
+        return;
+    };
+    let subview2 = subviews.remove(idx);
+    assert!(subview2 == subview);
+    subviews.insert(0, subview);
+
+    let subview_layer = env.objc.borrow::<UIViewHostObject>(subview).layer;
+    () = msg![env; subview_layer removeFromSuperlayer];
+    () = msg![env; layer insertSublayer:subview_layer atIndex:0u32];
 }
 
 - (())removeFromSuperview {
@@ -442,8 +488,31 @@ pub const CLASSES: ClassExports = objc_classes! {
 
 // TODO: support setNeedsDisplayInRect:
 - (())setNeedsDisplay {
-    let layer = env.objc.borrow::<UIViewHostObject>(this).layer;
-    msg![env; layer setNeedsDisplay]
+    // UIView has a method called drawRect: that subclasses override if they
+    // need custom drawing. touchHLE's UIView (a CALayerDelegate) provides
+    // an implementation of drawLayer:inContext: that calls drawRect:.
+    // This maintains a clean separation of UIView and CALayer.
+    //
+    // To avoid wasting space and time on unnecessary bitmaps and drawing,
+    // let's optimize here by only marking the layer as needing display if
+    // the UIView's subclass overrides drawRect: or drawLayer:inContext:.
+    let this_class = ObjC::read_isa(this, &env.mem);
+
+    let ui_view_class = env.objc.get_known_class("UIView", &mut env.mem);
+
+    let draw_layer_sel = env.objc.lookup_selector("drawLayer:inContext:").unwrap();
+    let draw_rect_sel = env.objc.lookup_selector("drawRect:").unwrap();
+
+    if env
+        .objc
+        .class_overrides_method_of_superclass(this_class, draw_rect_sel, ui_view_class)
+        || env
+            .objc
+            .class_overrides_method_of_superclass(this_class, draw_layer_sel, ui_view_class)
+    {
+        let layer = env.objc.borrow::<UIViewHostObject>(this).layer;
+        msg![env; layer setNeedsDisplay]
+    }
 }
 
 - (CGRect)bounds {

@@ -45,9 +45,7 @@ fn calloc(env: &mut Environment, count: GuestUSize, size: GuestUSize) -> MutVoid
     set_errno(env, 0);
 
     let total = size.checked_mul(count).unwrap();
-    let res = env.mem.alloc(total);
-    env.mem.bytes_at_mut(res.cast(), total).fill(0);
-    res
+    env.mem.calloc(total)
 }
 
 fn realloc(env: &mut Environment, ptr: MutVoidPtr, size: GuestUSize) -> MutVoidPtr {
@@ -91,18 +89,56 @@ fn atexit(
     0 // success
 }
 
-fn skip_whitespace(env: &mut Environment, s: ConstPtr<u8>) -> ConstPtr<u8> {
-    let mut start = s;
+#[allow(rustdoc::broken_intra_doc_links)] // https://github.com/rust-lang/rust/issues/83049
+/// Counts whitespaces in `subject` starting from `offset`.
+///
+/// `getc_fn` is a callback to get next character from `subject`.
+/// 3rd parameter in this callback is a index which is safe to ignore
+/// (for example, in case of a file stream).
+/// Error signifies an abnormal stop of input,
+/// such as [crate::libc::stdio::EOF] in the file stream.
+/// Note: `'\0'` does not necessary expect to produce an error!
+///
+/// `ungetc_fn` is a callback to un-get character from `subject`.
+/// Could be ignored entirely (for example, in case of a string).
+///
+/// `subject` is either C string or file stream (for now).
+///
+/// `offset` defines an offset in `subject` from which conversion starts.
+/// Could be ignored entirely (for example, in case of a file stream).
+///
+/// Returns count of whitespaces. Error returned from `getc_fn` is propagated
+/// but count is retuned too.
+fn count_whitespace_generic<
+    T,
+    U,
+    F1: Fn(&mut Environment, MutPtr<U>, GuestUSize) -> Result<T, ()>,
+    F2: Fn(&mut Environment, MutPtr<U>, u8), // TODO: make last param generic too?
+>(
+    env: &mut Environment,
+    getc_fn: F1,
+    ungetc_fn: F2,
+    subject: MutPtr<U>,
+    offset: GuestUSize,
+) -> Result<GuestUSize, GuestUSize>
+where
+    u8: From<T>,
+{
+    let mut count: GuestUSize = offset;
     loop {
-        let c = env.mem.read(start);
+        let Ok(c) = getc_fn(env, subject, count) else {
+            return Err(count - offset);
+        };
+        let c: u8 = c.into();
         // Rust's definition of whitespace excludes vertical tab, unlike C's
         if c.is_ascii_whitespace() || c == b'\x0b' {
-            start += 1;
+            count += 1;
         } else {
+            ungetc_fn(env, subject, c);
             break;
         }
     }
-    start
+    Ok(count - offset)
 }
 
 fn atoi(env: &mut Environment, s: ConstPtr<u8>) -> i32 {
@@ -148,9 +184,6 @@ fn prng(state: u32) -> u32 {
 }
 
 const RAND_MAX: i32 = i32::MAX;
-const LONG_MIN: i32 = i32::MIN;
-const LONG_MAX: i32 = i32::MAX;
-const ULONG_MAX: u32 = u32::MAX;
 
 fn srand(env: &mut Environment, seed: u32) {
     env.libc_state.stdlib.rand = seed;
@@ -280,7 +313,6 @@ fn strtof(env: &mut Environment, nptr: ConstPtr<u8>, endptr: MutPtr<ConstPtr<u8>
     number as f32
 }
 
-// TODO: fix same issues as for strtol()
 pub fn strtoul(
     env: &mut Environment,
     str: ConstPtr<u8>,
@@ -290,32 +322,67 @@ pub fn strtoul(
     // TODO: handle errno properly
     set_errno(env, 0);
 
-    let start = skip_whitespace(env, str);
-    let whitespace_len = Ptr::to_bits(start) - Ptr::to_bits(str);
-
-    let s = env.mem.cstr_at_utf8(start).unwrap();
-    log_dbg!("strtoul({:?} ({}), {:?}, {})", str, s, endptr, base);
-    let (trimmed, len) = if base == 16 {
-        // We need to count prefix in the length
-        (
-            s.trim_start_matches("0x"),
-            s.len() + whitespace_len as usize,
-        )
-    } else {
-        assert_eq!(base, 10);
-        let trimmed = s.trim_end_matches(|c: char| !char::is_ascii_digit(&c));
-        (trimmed, trimmed.len() + whitespace_len as usize)
-    };
-    let res = if trimmed.is_empty() {
-        0
-    } else {
-        u32::from_str_radix(trimmed, base as u32).unwrap_or(ULONG_MAX)
-    };
-    if !endptr.is_null() {
-        let len: GuestUSize = len.try_into().unwrap();
-        env.mem.write(endptr, (str + len).cast_mut());
+    let parse_res = str_to_int_inner_generic(
+        env,
+        |env, s, idx| Ok(env.mem.read(s + idx)),
+        |_, _, _| (), // could be ignored
+        str.cast_mut(),
+        0, // starting offset
+        base.try_into().unwrap(),
+        u32::MAX, // max_length
+        |s, base| u32::from_str_radix(s, base).unwrap_or(u32::MAX),
+        |num| num.wrapping_neg(),
+    );
+    match parse_res {
+        Ok((res, len)) => {
+            if !endptr.is_null() {
+                env.mem.write(endptr, (str + len).cast_mut());
+            }
+            res
+        }
+        Err(_) => {
+            if !endptr.is_null() {
+                env.mem.write(endptr, str.cast_mut());
+            }
+            0
+        }
     }
-    res
+}
+
+fn strtoull(
+    env: &mut Environment,
+    str: ConstPtr<u8>,
+    endptr: MutPtr<MutPtr<u8>>,
+    base: i32,
+) -> u64 {
+    // TODO: handle errno properly
+    set_errno(env, 0);
+
+    let parse_res = str_to_int_inner_generic(
+        env,
+        |env, s, idx| Ok(env.mem.read(s + idx)),
+        |_, _, _| (), // could be ignored
+        str.cast_mut(),
+        0, // starting offset
+        base.try_into().unwrap(),
+        u32::MAX, // max_length
+        |s, base| u64::from_str_radix(s, base).unwrap_or(u64::MAX),
+        |num| num.wrapping_neg(),
+    );
+    match parse_res {
+        Ok((res, len)) => {
+            if !endptr.is_null() {
+                env.mem.write(endptr, (str + len).cast_mut());
+            }
+            res
+        }
+        Err(_) => {
+            if !endptr.is_null() {
+                env.mem.write(endptr, str.cast_mut());
+            }
+            0
+        }
+    }
 }
 
 fn strtol(env: &mut Environment, str: ConstPtr<u8>, endptr: MutPtr<MutPtr<u8>>, base: i32) -> i32 {
@@ -418,6 +485,15 @@ fn wcstombs(
     len
 }
 
+fn system(env: &mut Environment, cmd: ConstPtr<u8>) -> i32 {
+    if cmd.is_null() {
+        log!("TODO: App checked for sh availability with system(NULL), returning 0");
+        return 0; // sh is not available!
+    }
+    log!("system({:?})", env.mem.cstr_at_utf8(cmd));
+    todo!()
+}
+
 pub const FUNCTIONS: FunctionExports = &[
     export_c_func!(malloc(_)),
     export_c_func!(malloc_size(_)),
@@ -440,120 +516,332 @@ pub const FUNCTIONS: FunctionExports = &[
     export_c_func!(bsearch(_, _, _, _, _)),
     export_c_func!(strtof(_, _)),
     export_c_func!(strtoul(_, _, _)),
+    export_c_func!(strtoull(_, _, _)),
     export_c_func!(strtol(_, _, _)),
     export_c_func!(realpath(_, _)),
     export_c_func_aliased!("realpath$DARWIN_EXTSN", realpath(_, _)),
     export_c_func!(mbstowcs(_, _, _)),
     export_c_func!(wcstombs(_, _, _)),
+    export_c_func!(system(_)),
 ];
 
-/// Returns a tuple containing the parsed number and the length of the number in
-/// the string
+/// A simple wrapper around [atof_inner_generic] for the case of C string.
 pub fn atof_inner(
     env: &mut Environment,
     s: ConstPtr<u8>,
 ) -> Result<(f64, u32), <f64 as FromStr>::Err> {
-    // atof() is similar to atoi().
-    // FIXME: no C99 hexfloat, INF, NAN support
-    let start = skip_whitespace(env, s);
-    let whitespace_len = Ptr::to_bits(start) - Ptr::to_bits(s);
-    let mut len = 0;
-    let maybe_sign = env.mem.read(start + len);
-    if maybe_sign == b'+' || maybe_sign == b'-' || maybe_sign.is_ascii_digit() {
-        len += 1;
-    }
-    while env.mem.read(start + len).is_ascii_digit() {
-        len += 1;
-    }
-    if env.mem.read(start + len) == b'.' {
-        len += 1;
-        while env.mem.read(start + len).is_ascii_digit() {
-            len += 1;
-        }
-    }
-    if env.mem.read(start + len).eq_ignore_ascii_case(&b'e') {
-        len += 1;
-        let maybe_sign = env.mem.read(start + len);
-        if maybe_sign == b'+' || maybe_sign == b'-' || maybe_sign.is_ascii_digit() {
-            len += 1;
-        }
-        while env.mem.read(start + len).is_ascii_digit() {
-            len += 1;
-        }
-    }
+    atof_inner_generic(
+        env,
+        |env, s, idx| Ok(env.mem.read(s + idx)),
+        |_, _, _| (),
+        s.cast_mut(),
+        0,
+    )
+}
 
-    let s = std::str::from_utf8(env.mem.bytes_at(start, len)).unwrap();
+#[allow(rustdoc::broken_intra_doc_links)] // https://github.com/rust-lang/rust/issues/83049
+/// Generic implementation of a conversion helper to `double`.
+///
+/// `getc_fn` is a callback to get next character from `subject`.
+/// 3rd parameter in this callback is a index which is safe to ignore
+/// (for example, in case of a file stream).
+/// Error signifies an abnormal stop of input,
+/// such as [crate::libc::stdio::EOF] in the file stream.
+/// Note: `'\0'` does not necessary expect to produce an error!
+///
+/// `ungetc_fn` is a callback to un-get character from `subject`.
+/// Could be ignored entirely (for example, in case of a string).
+///
+/// `subject` is either C string or file stream (for now).
+///
+/// `offset` defines an offset in `subject` from which conversion starts.
+/// Could be ignored entirely (for example, in case of a file stream).
+///
+/// Returns a tuple containing the parsed number and the length of the number in
+/// the string.
+///
+/// See also a TODO comment in [str_to_int_inner_generic].
+pub fn atof_inner_generic<
+    T,
+    U,
+    F1: Fn(&mut Environment, MutPtr<U>, GuestUSize) -> Result<T, ()>,
+    F2: Fn(&mut Environment, MutPtr<U>, u8), // TODO: make last param generic too?
+>(
+    env: &mut Environment,
+    getc_fn: F1,
+    ungetc_fn: F2,
+    subject: MutPtr<U>,
+    offset: GuestUSize,
+) -> Result<(f64, u32), <f64 as FromStr>::Err>
+where
+    u8: From<T>,
+{
+    let mut whitespace_len = 0;
+    let mut len = 0;
+    let mut chars = Vec::new();
+
+    // Helper is needed to support early returns on `getc_fn` errors
+    // (e.g. EOF in the input stream)
+    // We don't care about return of helper because modified vars are
+    // captured indirectly.
+    let _ = || -> Result<(), ()> {
+        // atof() is similar to atoi().
+        // FIXME: no C99 hexfloat, INF, NAN support
+        match count_whitespace_generic(env, &getc_fn, &ungetc_fn, subject, offset) {
+            Ok(count) => {
+                whitespace_len = count;
+            }
+            Err(count) => {
+                whitespace_len = count;
+                return Err(());
+            }
+        }
+
+        let maybe_sign: u8 = getc_fn(env, subject, offset + whitespace_len + len)?.into();
+        if maybe_sign == b'+' || maybe_sign == b'-' || maybe_sign.is_ascii_digit() {
+            chars.push(maybe_sign);
+            len += 1;
+        } else {
+            ungetc_fn(env, subject, maybe_sign);
+        }
+
+        let mut curr: u8 = getc_fn(env, subject, offset + whitespace_len + len)?.into();
+        while (curr as char).is_ascii_digit() {
+            chars.push(curr);
+            len += 1;
+            curr = getc_fn(env, subject, offset + whitespace_len + len)?.into();
+        }
+
+        // TODO: assert C locale
+        if curr == b'.' {
+            chars.push(curr);
+            len += 1;
+            curr = getc_fn(env, subject, offset + whitespace_len + len)?.into();
+            while (curr as char).is_ascii_digit() {
+                chars.push(curr);
+                len += 1;
+                curr = getc_fn(env, subject, offset + whitespace_len + len)?.into();
+            }
+        }
+
+        if curr.eq_ignore_ascii_case(&b'e') {
+            chars.push(curr);
+            len += 1;
+
+            let maybe_sign: u8 = getc_fn(env, subject, offset + whitespace_len + len)?.into();
+            if maybe_sign == b'+' || maybe_sign == b'-' || maybe_sign.is_ascii_digit() {
+                chars.push(maybe_sign);
+                len += 1;
+            } else {
+                ungetc_fn(env, subject, maybe_sign);
+            }
+
+            curr = getc_fn(env, subject, offset + whitespace_len + len)?.into();
+            while (curr as char).is_ascii_digit() {
+                chars.push(curr);
+                len += 1;
+                curr = getc_fn(env, subject, offset + whitespace_len + len)?.into();
+            }
+        }
+        ungetc_fn(env, subject, curr);
+
+        assert_eq!(chars.len() as u32, len);
+        Ok(())
+    }();
+
+    let s = std::str::from_utf8(&chars).unwrap();
+    log_dbg!("atof_inner_generic('{}')", s);
     s.parse().map(|result| (result, whitespace_len + len))
 }
 
+/// A simple wrapper around [str_to_int_inner_generic]
+/// for the case of C string and i32.
+fn strtol_inner(env: &mut Environment, str: ConstPtr<u8>, base: u32) -> Result<(i32, u32), ()> {
+    str_to_int_inner_generic(
+        env,
+        |env, s, idx| Ok(env.mem.read(s + idx)),
+        |_, _, _| (), // could be ignored
+        str.cast_mut(),
+        0, // starting offset
+        base,
+        u32::MAX, // max_length
+        |s, base| i32::from_str_radix(s, base).unwrap_or(i32::MAX),
+        |num| num.checked_mul(-1).unwrap_or(i32::MIN),
+    )
+}
+
+#[allow(rustdoc::broken_intra_doc_links)] // https://github.com/rust-lang/rust/issues/83049
+/// Generic implementation of a conversion helper from string to an integer.
+///
+/// `getc_fn` is a callback to get next character from `subject`.
+/// 3rd parameter in this callback is a index which is safe to ignore
+/// (for example, in case of a file stream).
+/// Error signifies an abnormal stop of input,
+/// such as [crate::libc::stdio::EOF] in the file stream.
+/// Note: `'\0'` does not necessary expect to produce an error!
+///
+/// `ungetc_fn` is a callback to un-get character from `subject`.
+/// Could be ignored entirely (for example, in case of a string).
+///
+/// `subject` is either C string or file stream (for now).
+///
+/// `offset` defines an offset in `subject` from which conversion starts.
+/// Could be ignored entirely (for example, in case of a file stream).
+///
+/// `base` of conversion.
+/// Is mutable because in case of base 0 we need to auto-detect it.
+///
+/// `from_str_radix_fn` is a callback to actually convert accumulated string
+/// to the number.
+///
+/// `negation_fn` is a callback which specifies how '-' is treated.
+///
 /// Returns a tuple containing the parsed number in the given base and
 /// the length of the number in the string.
-/// Base is mutable because in case if base 0 we need to auto-detect it.
-pub fn strtol_inner(
+///
+/// Right now this function is a bit of the mess... We bridge together the
+/// worlds of string indexing and file stream processing with questionable
+/// results. We have fair amount of integration tests for `strtoul`
+/// and `sscanf`/`fscanf`, but some of corner cases are definitely not covered.
+/// One idea for cleaning that would be to fully embrace `getc`/`ungetc`
+/// approach and get rid of indexing.
+/// (Like, let caller to deal with indexing and override `offset` somehow?)
+/// TODO: find a more powerful abstraction for generalization
+#[allow(clippy::too_many_arguments)]
+pub fn str_to_int_inner_generic<
+    T,
+    U,
+    Q,
+    F1: Fn(&mut Environment, MutPtr<U>, GuestUSize) -> Result<T, ()>,
+    F2: Fn(&mut Environment, MutPtr<U>, u8), // TODO: make last param generic too?
+    F3: Fn(&str, u32) -> Q,
+    F4: Fn(Q) -> Q,
+>(
     env: &mut Environment,
-    str: ConstPtr<u8>,
+    getc_fn: F1,
+    ungetc_fn: F2,
+    subject: MutPtr<U>,
+    offset: GuestUSize,
     mut base: u32,
-) -> Result<(i32, u32), ()> {
-    // strtol() doesn't work with a null-terminated string, instead it stops
-    // once it hits something that's not a digit, so we have to do some parsing
-    // ourselves.
-    let start = skip_whitespace(env, str);
-    let whitespace_len = Ptr::to_bits(start) - Ptr::to_bits(str);
+    max_length: GuestUSize,
+    from_str_radix_fn: F3,
+    negation_fn: F4,
+) -> Result<(Q, u32), ()>
+where
+    u8: From<T>,
+    Q: Default,
+{
+    let mut whitespace_len = 0;
     let mut len = 0;
-    let maybe_sign = env.mem.read(start + len);
     let mut sign = None;
     let mut prefix_length = 0;
-    if maybe_sign == b'+' || maybe_sign == b'-' {
-        sign = Some(maybe_sign);
-        prefix_length += 1;
-        len += 1;
-    }
-    // We need to do base detection before we can start counting
-    // the number length, but after we maybe skipped the sign
-    if base == 0 {
-        base = if env.mem.read(start + len) == b'0' {
-            let next = env.mem.read(start + len + 1);
-            if next == b'x' || next == b'X' {
-                16
-            } else {
-                8
+    let mut chars = Vec::new();
+
+    // Helper is needed to support early returns on `getc_fn` errors
+    // (e.g. EOF in the input stream)
+    // We don't care about return of helper because modified vars are
+    // captured indirectly.
+    let _ = || -> Result<(), ()> {
+        // strtol() doesn't work with a null-terminated string,
+        // instead it stops once it hits something that's not a digit,
+        // so we have to do some parsing ourselves.
+        match count_whitespace_generic(env, &getc_fn, &ungetc_fn, subject, offset) {
+            Ok(count) => {
+                whitespace_len = count;
+            }
+            Err(count) => {
+                whitespace_len = count;
+                return Err(());
+            }
+        }
+
+        let maybe_sign: u8 = getc_fn(env, subject, offset + whitespace_len + len)?.into();
+        if maybe_sign == b'+' || maybe_sign == b'-' {
+            sign = Some(maybe_sign);
+            prefix_length += 1;
+            len += 1;
+            if len == max_length {
+                return Ok(());
             }
         } else {
-            10
+            ungetc_fn(env, subject, maybe_sign);
         }
-    }
-    // Skipping prefix if needed
-    if (base == 8 || base == 16) && env.mem.read(start + len) == b'0' {
-        len += 1;
-        prefix_length += 1;
-        if base == 16 {
-            let next = env.mem.read(start + len);
-            if next == b'x' || next == b'X' {
-                len += 1;
-                prefix_length += 1;
+        // We need to do base detection before we can start counting
+        // the number length, but after we maybe skipped the sign
+        // TODO: detect base and skip prefix in one pass
+        if base == 0 {
+            let curr: u8 = getc_fn(env, subject, offset + whitespace_len + len)?.into();
+            base = if curr == b'0' {
+                let next: u8 = getc_fn(env, subject, offset + whitespace_len + len + 1)?.into();
+                ungetc_fn(env, subject, next);
+                ungetc_fn(env, subject, curr);
+                if next == b'x' || next == b'X' {
+                    16
+                } else {
+                    8
+                }
+            } else {
+                ungetc_fn(env, subject, curr);
+                10
             }
         }
-    }
-    while (env.mem.read(start + len) as char).is_digit(base) {
-        len += 1;
-    }
+        // Skipping prefix if needed
+        if base == 8 || base == 16 {
+            let curr: u8 = getc_fn(env, subject, offset + whitespace_len + len)?.into();
+            if curr == b'0' {
+                len += 1;
+                if len == max_length {
+                    return Ok(());
+                }
+                prefix_length += 1;
+                if base == 16 {
+                    let next: u8 = getc_fn(env, subject, offset + whitespace_len + len)?.into();
+                    if next == b'x' || next == b'X' {
+                        len += 1;
+                        if len == max_length {
+                            return Ok(());
+                        }
+                        prefix_length += 1;
+                    } else {
+                        ungetc_fn(env, subject, next);
+                    }
+                } else {
+                    ungetc_fn(env, subject, curr);
+                }
+            } else {
+                ungetc_fn(env, subject, curr);
+            }
+        }
+        let mut curr: u8 = getc_fn(env, subject, offset + whitespace_len + len)?.into();
+        while (curr as char).is_digit(base) {
+            chars.push(curr);
+            len += 1;
+            if len == max_length {
+                return Ok(());
+            }
+            curr = getc_fn(env, subject, offset + whitespace_len + len)?.into();
+        }
+        ungetc_fn(env, subject, curr);
+        assert_eq!(chars.len() as u32, len - prefix_length);
+        Ok(())
+    }();
 
-    let s =
-        std::str::from_utf8(env.mem.bytes_at(start + prefix_length, len - prefix_length)).unwrap();
-    log_dbg!("strtol_inner({:?} ({}), {})", str, s, base);
+    let s = std::str::from_utf8(&chars).unwrap();
+    log_dbg!("strtol_inner_generic('{}', {})", s, base);
+
     assert!((2..=36).contains(&base));
     let magnitude_len = len - prefix_length;
     let res = if magnitude_len > 0 {
         // TODO: set errno on range errors
-        let mut res = i32::from_str_radix(s, base).unwrap_or(LONG_MAX);
+        let mut res = from_str_radix_fn(s, base);
         if sign == Some(b'-') {
-            res = res.checked_mul(-1).unwrap_or(LONG_MIN);
+            res = negation_fn(res);
         }
         res
     } else {
         // Special case - prefix of invalid octal number is a valid number 0
         if base == 8 && prefix_length > 0 {
-            return Ok((0, whitespace_len + prefix_length));
+            return Ok((Q::default(), whitespace_len + prefix_length));
         }
         return Err(());
     };

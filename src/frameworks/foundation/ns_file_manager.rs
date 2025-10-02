@@ -207,7 +207,6 @@ pub const CLASSES: ClassExports = objc_classes! {
                    attributes:(id)attributes // NSDictionary*
                         error:(MutPtr<id>)error { // NSError**
     assert_eq!(attributes, nil); // TODO
-    assert!(error.is_null());
 
     let path_str = ns_string::to_rust_string(env, path); // TODO: avoid copy
     let res = if with_intermediates {
@@ -221,6 +220,7 @@ pub const CLASSES: ClassExports = objc_classes! {
             true
         }
         Err(err) => {
+            assert!(error.is_null()); // TODO
             log!(
                 "Warning: createDirectoryAtPath {} failed with {:?}, returning false",
                 path_str,
@@ -270,6 +270,14 @@ pub const CLASSES: ClassExports = objc_classes! {
     contents
 }
 
+- (bool)isReadableFileAtPath:(id)path { // NSString*
+    let (_, readable, _, _) = {
+        let path = ns_string::to_rust_string(env, path); // TODO: avoid copy
+        env.fs.access(GuestPath::new(&path))
+    };
+    readable
+}
+
 - (bool)isWritableFileAtPath:(id)path { // NSString*
     let (_, _, writable, _) = {
         let path = ns_string::to_rust_string(env, path); // TODO: avoid copy
@@ -314,15 +322,19 @@ pub const CLASSES: ClassExports = objc_classes! {
 
 - (bool)copyItemAtPath:(id)src // NSString*
                 toPath:(id)dst // NSString*
-                 error:(MutPtr<id>)_error { // NSError**
+                 error:(MutPtr<id>)error { // NSError**
     let src = ns_string::to_rust_string(env, src);
     let dst = ns_string::to_rust_string(env, dst);
     let data = match env.fs.read(GuestPath::new(src.as_ref())) {
         Ok(d) => d,
-        Err(_) => todo!()
+        Err(_) => {
+            assert!(error.is_null()); // TODO
+            return false;
+        }
     };
     if env.fs.write(GuestPath::new(dst.as_ref()), &data).is_err() {
-        todo!();
+        assert!(error.is_null()); // TODO
+        return false;
     }
     true
 }
@@ -337,7 +349,7 @@ pub const CLASSES: ClassExports = objc_classes! {
 - (id)fileAttributesAtPath:(id)path // NSString *
               traverseLink:(bool)traverse {
     // TODO: other attributes
-    log!("Warning: NSFileManager fileAttributesAtPath:traverseLink: returns only NSFileModificationDate and NSFileSize attributes!");
+    log_once!("Warning: NSFileManager fileAttributesAtPath:traverseLink: returns only NSFileModificationDate and NSFileSize attributes!");
 
     let path = ns_string::to_rust_string(env, path); // TODO: avoid copy
     // TODO: traverse link
@@ -352,7 +364,7 @@ pub const CLASSES: ClassExports = objc_classes! {
     assert!(error.is_null()); // TODO
 
     // TODO: other attributes
-    log!("Warning: NSFileManager attributesOfItemAtPath:error: returns only NSFileModificationDate and NSFileSize attributes!");
+    log_once!("Warning: NSFileManager attributesOfItemAtPath:error: returns only NSFileModificationDate and NSFileSize attributes!");
 
     let path = ns_string::to_rust_string(env, path); // TODO: avoid copy
     // TODO: traverse link
@@ -365,7 +377,7 @@ pub const CLASSES: ClassExports = objc_classes! {
 - (id)attributesOfFileSystemForPath:(id)_path
                               error:(MutPtr<id>)error {
     // TODO: other attributes
-    log!("Warning: NSFileManager attributesOfFileSystemForPath:error: returns only NSFileSystemFreeSize attribute!");
+    log_once!("Warning: NSFileManager attributesOfFileSystemForPath:error: returns only NSFileSystemFreeSize attribute!");
 
     assert!(error.is_null()); // TODO
 
@@ -401,6 +413,14 @@ pub const CLASSES: ClassExports = objc_classes! {
 /// Helper function for `fileAttributesAtPath:traverseLink:` and
 /// `attributesOfItemAtPath:error:`
 fn file_attributes_common(env: &mut Environment, guest_path: &GuestPath) -> id {
+    if !env.fs.exists(guest_path) {
+        log!(
+            "file_attributes_common() called with file that does not exist: {:?}, Returning nil",
+            guest_path
+        );
+        return nil;
+    }
+
     // TODO: support more attributes
     let unix_timestamp: f64 = env.fs.modified(guest_path).unwrap() as f64;
     let unix_ref_date: id = msg_class![env; NSDate dateWithTimeIntervalSince1970:0f64];

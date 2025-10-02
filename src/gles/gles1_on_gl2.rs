@@ -40,6 +40,11 @@ pub const CAPABILITIES: &[GLenum] = &[
     gl21::BLEND,
     gl21::COLOR_LOGIC_OP,
     gl21::CLIP_PLANE0,
+    gl21::CLIP_PLANE1,
+    gl21::CLIP_PLANE2,
+    gl21::CLIP_PLANE3,
+    gl21::CLIP_PLANE4,
+    gl21::CLIP_PLANE5,
     gl21::LIGHT0,
     gl21::LIGHT1,
     gl21::LIGHT2,
@@ -146,6 +151,11 @@ const GET_PARAMS: ParamTable = ParamTable(&[
     (gl21::CLIENT_ACTIVE_TEXTURE, ParamType::Int, 1),
     // TODO: arbitrary number of clip planes?
     (gl21::CLIP_PLANE0, ParamType::Boolean, 1),
+    (gl21::CLIP_PLANE1, ParamType::Boolean, 1),
+    (gl21::CLIP_PLANE2, ParamType::Boolean, 1),
+    (gl21::CLIP_PLANE3, ParamType::Boolean, 1),
+    (gl21::CLIP_PLANE4, ParamType::Boolean, 1),
+    (gl21::CLIP_PLANE5, ParamType::Boolean, 1),
     (gl21::COLOR_ARRAY, ParamType::Boolean, 1),
     (gl21::COLOR_ARRAY_BUFFER_BINDING, ParamType::Int, 1),
     (gl21::COLOR_ARRAY_SIZE, ParamType::Int, 1),
@@ -862,6 +872,12 @@ impl GLES for GLES1OnGL2 {
     }
     unsafe fn PolygonOffsetx(&mut self, factor: GLfixed, units: GLfixed) {
         gl21::PolygonOffset(fixed_to_float(factor), fixed_to_float(units))
+    }
+    unsafe fn SampleCoverage(&mut self, value: GLclampf, invert: GLboolean) {
+        gl21::SampleCoverage(value, invert)
+    }
+    unsafe fn SampleCoveragex(&mut self, value: GLclampx, invert: GLboolean) {
+        gl21::SampleCoverage(fixed_to_float(value), invert)
     }
     unsafe fn ShadeModel(&mut self, mode: GLenum) {
         assert!(mode == gl21::FLAT || mode == gl21::SMOOTH);
@@ -1889,6 +1905,12 @@ impl GLES for GLES1OnGL2 {
     }
     unsafe fn GenRenderbuffersOES(&mut self, n: GLsizei, renderbuffers: *mut GLuint) {
         gl21::GenRenderbuffersEXT(n, renderbuffers)
+    }
+    unsafe fn IsFramebufferOES(&mut self, renderbuffer: GLuint) -> GLboolean {
+        gl21::IsFramebufferEXT(renderbuffer)
+    }
+    unsafe fn IsRenderbufferOES(&mut self, renderbuffer: GLuint) -> GLboolean {
+        gl21::IsRenderbufferEXT(renderbuffer)
     }
     unsafe fn BindFramebufferOES(&mut self, target: GLenum, framebuffer: GLuint) {
         gl21::BindFramebufferEXT(target, framebuffer)

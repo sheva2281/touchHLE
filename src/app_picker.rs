@@ -279,7 +279,11 @@ fn show_app_picker_gui(
         };
         let mut image = Image::from_bytes(bytes).unwrap();
         // should match Bundle::load_icon()
-        image.round_corners((10.0 / 57.0) * (image.dimensions().0 as f32));
+        image.round_corners(
+            (10.0 / 57.0) * (image.dimensions().0 as f32),
+            /* four_corners: */ true,
+            /* add_sheen: */ true,
+        );
         image
     };
 
@@ -524,7 +528,7 @@ fn show_app_picker_gui(
         }
     }
     fn update_scale_hack_buttons(env: &mut Environment, buttons: &[id], value: Option<NonZeroU32>) {
-        update_quick_option_buttons(env, buttons, value.map_or(0, |v| (v.get() as usize)));
+        update_quick_option_buttons(env, buttons, value.map_or(0, |v| v.get() as usize));
     }
     fn update_orientation_buttons(
         env: &mut Environment,
@@ -770,10 +774,12 @@ fn make_icon_grid(
         let col = i % num_cols;
         let row = i / num_cols;
 
+        // Rounding is needed here to avoid a blurry or offset image.
         let icon_frame = CGRect {
             origin: CGPoint {
-                x: icon_grid_origin.x + (col as CGFloat) * (ICON_SIZE.width + icon_gap_x),
-                y: icon_grid_origin.y + (row as CGFloat) * (ICON_SIZE.height + icon_gap_y),
+                x: (icon_grid_origin.x + (col as CGFloat) * (ICON_SIZE.width + icon_gap_x)).round(),
+                y: (icon_grid_origin.y + (row as CGFloat) * (ICON_SIZE.height + icon_gap_y))
+                    .round(),
             },
             size: ICON_SIZE,
         };
@@ -787,10 +793,11 @@ fn make_icon_grid(
                             forControlEvents:UIControlEventTouchUpInside];
         () = msg![env; main_view addSubview:icon_button];
 
+        // Rounding is needed here to avoid blurry text.
         let label_frame = CGRect {
             origin: CGPoint {
-                x: icon_frame.origin.x - (label_size.width - ICON_SIZE.width) / 2.0,
-                y: icon_frame.origin.y + ICON_SIZE.height + 4.0,
+                x: (icon_frame.origin.x - (label_size.width - ICON_SIZE.width) / 2.0).round(),
+                y: (icon_frame.origin.y + ICON_SIZE.height + 4.0).round(),
             },
             size: label_size,
         };
@@ -894,8 +901,11 @@ fn make_icon_from_glyph(
 
     let cg_image = CGBitmapContextCreateImage(env, context);
     // This radius should match the one in src/bundle.rs.
-    cg_image::borrow_image_mut(&mut env.objc, cg_image)
-        .round_corners((10.0 / 57.0) * ICON_SIZE.width);
+    cg_image::borrow_image_mut(&mut env.objc, cg_image).round_corners(
+        (10.0 / 57.0) * ICON_SIZE.width,
+        /* four_corners: */ true,
+        /* add_sheen: */ true,
+    );
     CGContextRelease(env, context);
 
     let ui_image: id = msg_class![env; UIImage imageWithCGImage:cg_image];

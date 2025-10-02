@@ -109,7 +109,7 @@ pub use crate::export_c_func_aliased; // #[macro_export] is weird...
 pub enum HostConstant {
     NSString(&'static str),
     NullPtr,
-    Custom(fn(&mut Mem, &mut Dyld) -> ConstVoidPtr),
+    Custom(fn(&mut Environment) -> ConstVoidPtr),
 }
 
 /// Type for lists of constants exported by host implementations of frameworks.
@@ -189,7 +189,13 @@ impl Dyld {
     /// The range of SVC IDs `SVC_LINKED_FUNCTIONS_BASE..` is used to reference
     /// [Self::linked_host_functions] entries.
     pub const SVC_LINKED_FUNCTIONS_BASE: u32 = Self::SVC_RETURN_TO_HOST + 1;
+    /// We reserve this SVC ID for lazy linking and returning right after.
+    /// It is also a mask for the linked functions to indicate that an
+    /// additional return instruction needs to be manually executed after
+    /// handling the SVC.
+    pub const SVC_LAZY_LINK_RET_FLAG: u32 = 0x800000;
 
+    const SYMBOL_STUB1_INSTRUCTIONS: [u32; 1] = [0xe59ff000]; // mask this with lowest 12 bits to restore instructions
     const SYMBOL_STUB_INSTRUCTIONS: [u32; 2] = [0xe59fc000, 0xe59cf000];
     const PIC_SYMBOL_STUB_INSTRUCTIONS: [u32; 3] = [0xe59fc004, 0xe08fc00c, 0xe59cf000];
 
@@ -238,6 +244,79 @@ impl Dyld {
         ns_string::register_constant_strings(&bins[0], mem, objc);
     }
 
+    /// Dumps all lazy symbols (functions) referenced by the binary
+    /// as JSON to stdout.
+    ///
+    /// The JSON has the following form:
+    /// ```json
+    /// {
+    ///     "object": "lazy_symbols",
+    ///     "symbols": [
+    ///         {
+    ///             "symbol": ((name of symbol)),
+    ///             "linked_to": "host" | "dylib" | null,
+    ///             "dylib": ((name of dylib)) | null,
+    ///         },
+    ///         ...
+    ///     ]
+    /// }
+    /// ```
+    pub fn dump_lazy_symbols(
+        &mut self,
+        bins: &[MachO],
+        file: &mut std::fs::File,
+    ) -> Result<(), std::io::Error> {
+        use std::io::Write;
+        // Guest binary is always bin 0.
+        let stubs = bins[0].get_section(SectionType::SymbolStubs).unwrap();
+        let info = stubs.dyld_indirect_symbol_info.as_ref().unwrap();
+        writeln!(
+            file,
+            "{{\n    \"object\":\"lazy_symbols\",\n    \"symbols\": ["
+        )?;
+
+        'sym: for (i, symbol) in info.indirect_undef_symbols.iter().enumerate() {
+            // Why doesn't json allow trailing commas...
+            let comma = if i == info.indirect_undef_symbols.len() - 1 {
+                ""
+            } else {
+                ","
+            };
+            let symbol = symbol.as_ref().unwrap();
+            if let Some(&(_, _)) = search_lists(function_lists::FUNCTION_LISTS, symbol) {
+                writeln!(
+                    file,
+                    "        {{ \"symbol\": \"{symbol}\", \"linked_to\": \"host\"}}{comma}"
+                )?;
+                continue;
+            }
+            for dylib in bins.iter() {
+                if dylib.exported_symbols.contains_key(symbol) {
+                    writeln!(
+                        file,
+                        "        {{ \"symbol\": \"{}\", \"linked_to\": \"dylib\", \"dylib\": \"{}\"}}{}",
+                        symbol, dylib.name, comma
+                    )?;
+                    continue 'sym;
+                }
+            }
+            writeln!(file, "        {{ \"symbol\": \"{symbol}\" }}{comma}")?;
+        }
+        writeln!(file, "    ]\n}}")
+    }
+
+    /// Dumps all non-objc symbols provided by touchHLE.
+    pub fn dump_dyld_host_symbols(file: &mut std::fs::File) -> Result<(), std::io::Error> {
+        use std::io::Write;
+        for (symbol, _) in function_lists::FUNCTION_LISTS.iter().flat_map(|&n| n) {
+            writeln!(file, "{symbol}")?;
+        }
+        for (symbol, _) in constant_lists::CONSTANT_LISTS.iter().flat_map(|&n| n) {
+            writeln!(file, "{symbol}")?;
+        }
+        Ok(())
+    }
+
     /// [Self::do_initial_linking] but for when this is the app picker's special
     /// environment with no binary (see [crate::Environment::new_without_app]).
     pub fn do_initial_linking_with_no_bins(&mut self, mem: &mut Mem, objc: &mut ObjC) {
@@ -272,6 +351,7 @@ impl Dyld {
         // two or three A32 instructions (PIC stub needs one more) followed by
         // the address or offset of the corresponding __la_symbol_ptr
         let expected_instructions = match entry_size {
+            4 => &[],
             12 => Self::SYMBOL_STUB_INSTRUCTIONS.as_slice(),
             16 => Self::PIC_SYMBOL_STUB_INSTRUCTIONS.as_slice(),
             _ => unimplemented!(),
@@ -286,10 +366,14 @@ impl Dyld {
                 assert!(mem.read(ptr + j.try_into().unwrap()) == instr);
             }
 
-            mem.write(ptr + 0, encode_a32_svc(Self::SVC_LAZY_LINK));
             // For convenience, make the stub return once the SVC is done
-            // (Otherwise we'd have to manually update the PC)
-            mem.write(ptr + 1, encode_a32_ret());
+            // (Otherwise we have to manually update the PC)
+            if entry_size == 4 {
+                mem.write(ptr + 0, encode_a32_svc(Self::SVC_LAZY_LINK_RET_FLAG));
+            } else {
+                mem.write(ptr + 0, encode_a32_svc(Self::SVC_LAZY_LINK));
+                mem.write(ptr + 1, encode_a32_ret());
+            }
             if entry_size == 16 {
                 // This is preceded by a return instruction, so if we do execute
                 // it, something has gone wrong.
@@ -352,6 +436,10 @@ impl Dyld {
                     trampoline_ptr
                 );
                 trampoline_ptr
+            } else if search_lists(constant_lists::CONSTANT_LISTS, name).is_some() {
+                // Skip the constants from DYLD_INFO because we already
+                // handle the consts when reading the __nl_symbol_ptr section
+                continue;
             } else {
                 unhandled_relocations
                     .entry(name)
@@ -458,7 +546,7 @@ impl Dyld {
                     let null_ptr_ptr = env.mem.alloc_and_write(null_ptr);
                     null_ptr_ptr.cast().cast_const()
                 }
-                HostConstant::Custom(f) => f(&mut env.mem, &mut env.dyld),
+                HostConstant::Custom(f) => f(env),
             };
             env.mem.write(symbol_ptr_ptr, symbol_ptr.cast());
         }
@@ -476,12 +564,15 @@ impl Dyld {
         svc: u32,
     ) -> Option<HostFunction> {
         match svc {
-            Self::SVC_LAZY_LINK => self.do_lazy_link(bins, mem, cpu, svc_pc),
+            Self::SVC_LAZY_LINK | Self::SVC_LAZY_LINK_RET_FLAG => {
+                self.do_lazy_link(bins, mem, cpu, svc_pc)
+            }
             Self::SVC_THREAD_EXIT | Self::SVC_RETURN_TO_HOST => unreachable!(), // don't handle here
             Self::SVC_LINKED_FUNCTIONS_BASE.. => {
-                let f = self
-                    .linked_host_functions
-                    .get((svc - Self::SVC_LINKED_FUNCTIONS_BASE) as usize);
+                let f = self.linked_host_functions.get(
+                    ((svc & !Self::SVC_LAZY_LINK_RET_FLAG) - Self::SVC_LINKED_FUNCTIONS_BASE)
+                        as usize,
+                );
                 let Some(&(symbol, f)) = f else {
                     panic!("Unexpected SVC #{svc} at {svc_pc:#x}");
                 };
@@ -506,8 +597,10 @@ impl Dyld {
             linked_function: u32,
             svc_pc: u32,
             entry_size: u32,
+            pic_offset: u32,
         ) -> (MutPtr<u32>, MutPtr<u32>) {
             let original_instructions = match entry_size {
+                4 => Dyld::SYMBOL_STUB1_INSTRUCTIONS.as_slice(),
                 12 => Dyld::SYMBOL_STUB_INSTRUCTIONS.as_slice(),
                 16 => Dyld::PIC_SYMBOL_STUB_INSTRUCTIONS.as_slice(),
                 _ => unreachable!(),
@@ -516,8 +609,12 @@ impl Dyld {
 
             // Restore the original stub, which calls the __la_symbol_ptr
             let stub_function_ptr: MutPtr<u32> = Ptr::from_bits(svc_pc);
-            for (i, &instr) in original_instructions.iter().enumerate() {
-                mem.write(stub_function_ptr + i.try_into().unwrap(), instr)
+            if entry_size == 4 {
+                mem.write(stub_function_ptr, original_instructions[0] | pic_offset)
+            } else {
+                for (i, &instr) in original_instructions.iter().enumerate() {
+                    mem.write(stub_function_ptr + i.try_into().unwrap(), instr)
+                }
             }
 
             cpu.invalidate_cache_range(stub_function_ptr.to_bits(), instruction_count * 4);
@@ -530,23 +627,36 @@ impl Dyld {
             } else {
                 // The PIC (position-independent code) stub uses a
                 // PC-relative offset rather than an absolute address.
-                let offset = mem.read(stub_function_ptr + instruction_count);
-                Ptr::from_bits(stub_function_ptr.to_bits() + offset + 12)
+                if entry_size == 4 {
+                    let offset = mem.read(stub_function_ptr) & 0xFFF;
+                    Ptr::from_bits(stub_function_ptr.to_bits() + offset + 8)
+                } else {
+                    let offset = mem.read(stub_function_ptr + instruction_count);
+                    Ptr::from_bits(stub_function_ptr.to_bits() + offset + 12)
+                }
             };
             mem.write(la_symbol_ptr, linked_function);
             (stub_function_ptr, la_symbol_ptr)
         }
 
-        let stubs = bins
+        let (stubs, pic_offset) = bins
             .iter()
-            .flat_map(|bin| bin.get_section(SectionType::SymbolStubs))
-            .find(|stubs| (stubs.addr..(stubs.addr + stubs.size)).contains(&svc_pc))
+            .find_map(|bin| {
+                let stubs = bin.get_section(SectionType::SymbolStubs)?;
+                if !(stubs.addr..(stubs.addr + stubs.size)).contains(&svc_pc) {
+                    return None;
+                }
+                let pic_offset = bin
+                    .get_section(SectionType::LazySymbolPointers)
+                    .map_or(0, |lazy_ptrs| lazy_ptrs.addr - stubs.addr);
+                Some((stubs, pic_offset))
+            })
             .unwrap();
 
         let info = stubs.dyld_indirect_symbol_info.as_ref().unwrap();
 
         let offset = svc_pc - stubs.addr;
-        assert!(offset % info.entry_size == 0);
+        assert!(offset.is_multiple_of(info.entry_size));
         let idx = (offset / info.entry_size) as usize;
 
         let symbol = info.indirect_undef_symbols[idx].as_deref().unwrap();
@@ -560,6 +670,7 @@ impl Dyld {
                 addr.addr_with_thumb_bit(),
                 svc_pc,
                 info.entry_size,
+                pic_offset,
             );
             log_dbg!(
                 "Linked host function {} at {:?}/{:?} to existing stub ({:?}).",
@@ -576,13 +687,20 @@ impl Dyld {
         if let Some(&(symbol, f)) = search_lists(function_lists::FUNCTION_LISTS, symbol) {
             // Allocate an SVC ID for this host function
             let idx: u32 = self.linked_host_functions.len().try_into().unwrap();
-            let svc = idx + Self::SVC_LINKED_FUNCTIONS_BASE;
+            let mut svc = idx + Self::SVC_LINKED_FUNCTIONS_BASE;
+            // Indicate to the handler to return manually after call
+            if info.entry_size == 4 {
+                assert!(svc < Self::SVC_LAZY_LINK_RET_FLAG);
+                svc |= Self::SVC_LAZY_LINK_RET_FLAG;
+            }
             self.linked_host_functions.push((symbol, f));
 
             // Rewrite stub function to call this host function
             let stub_function_ptr: MutPtr<u32> = Ptr::from_bits(svc_pc);
             mem.write(stub_function_ptr, encode_a32_svc(svc));
-            assert!(mem.read(stub_function_ptr + 1) == encode_a32_ret());
+            if info.entry_size != 4 {
+                assert!(mem.read(stub_function_ptr + 1) == encode_a32_ret());
+            }
 
             cpu.invalidate_cache_range(stub_function_ptr.to_bits(), 4);
 
@@ -600,7 +718,7 @@ impl Dyld {
         for dylib in bins.iter() {
             if let Some(&addr) = dylib.exported_symbols.get(symbol) {
                 let (stub_function_ptr, la_symbol_ptr) =
-                    link_by_restoring_stub(mem, cpu, addr, svc_pc, info.entry_size);
+                    link_by_restoring_stub(mem, cpu, addr, svc_pc, info.entry_size, pic_offset);
                 log_dbg!(
                     "Linked {} at {:?}/{:?} to {:#x} from {}",
                     symbol,

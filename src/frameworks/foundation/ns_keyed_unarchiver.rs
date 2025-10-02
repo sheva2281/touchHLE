@@ -24,8 +24,14 @@ use crate::objc::{
     NSZonePtr,
 };
 use crate::Environment;
-use plist::{Dictionary, Uid, Value};
-use std::io::Cursor;
+use flate2::read::{GzDecoder, ZlibDecoder};
+use nibarchive::{NIBArchive, ValueVariant};
+use plist::{Dictionary, Error, Uid, Value};
+use std::collections::HashMap;
+use std::io::{Cursor, Read};
+use zip::ZipArchive;
+
+const MAX_ARCHIVE_PARSE_DEPTH: usize = 6;
 
 pub const NSKeyedArchiveRootObjectKey: &str = "root";
 
@@ -43,6 +49,233 @@ struct NSKeyedUnarchiverHostObject {
     delegate: id,
 }
 impl HostObject for NSKeyedUnarchiverHostObject {}
+
+fn convert_nibarchive_to_plist(slice: &[u8]) -> Result<Value, Error> {
+    let nib = NIBArchive::from_bytes(slice).map_err(|e| {
+        log!("NIBArchive parsing error: {:?}", e);
+        Value::from_reader_xml(Cursor::new(b"")).unwrap_err()
+    })?;
+
+    let mut objects: Vec<Value> = Vec::new();
+    objects.push(Value::String("$null".to_string()));
+
+    let mut class_map: HashMap<String, usize> = HashMap::new();
+    let mut nib_objects_uids: Vec<usize> = Vec::new();
+    let mut nib_connections_uids: Vec<usize> = Vec::new();
+    let mut nib_visible_windows_uids: Vec<usize> = Vec::new();
+
+    for obj in nib.objects() {
+        let class_name = obj.class_name(nib.class_names()).name();
+
+        let class_uid = if let Some(&uid) = class_map.get(class_name) {
+            uid
+        } else {
+            let uid = objects.len();
+            class_map.insert(class_name.to_string(), uid);
+
+            let mut class_dict = Dictionary::new();
+            class_dict.insert(
+                "$classname".to_string(),
+                Value::String(class_name.to_string()),
+            );
+            let classes = vec![
+                Value::String(class_name.to_string()),
+                Value::String("NSObject".to_string()),
+            ];
+            class_dict.insert("$classes".to_string(), Value::Array(classes));
+            objects.push(Value::Dictionary(class_dict));
+            uid
+        };
+
+        let mut obj_dict = Dictionary::new();
+        obj_dict.insert(
+            "$class".to_string(),
+            Value::Uid(Uid::new(class_uid as u64)),
+        );
+
+        for value in obj.values(nib.values()) {
+            let key = value.key(nib.keys());
+            let val = match value.value() {
+                ValueVariant::Int8(v) => Value::Integer((*v as i64).into()),
+                ValueVariant::Int16(v) => Value::Integer((*v as i64).into()),
+                ValueVariant::Int32(v) => Value::Integer((*v as i64).into()),
+                ValueVariant::Int64(v) => Value::Integer((*v).into()),
+                ValueVariant::Bool(v) => Value::Boolean(*v),
+                ValueVariant::Float(v) => Value::Real(*v as f64),
+                ValueVariant::Double(v) => Value::Real(*v),
+                ValueVariant::Data(v) => Value::Data(v.clone()),
+                ValueVariant::Nil => {
+                    obj_dict.insert(key.to_string(), Value::Uid(Uid::new(0)));
+                    continue;
+                }
+                ValueVariant::ObjectRef(idx) => {
+                    Value::Uid(Uid::new(*idx as u64 + 1))
+                }
+            };
+            obj_dict.insert(key.to_string(), val);
+        }
+
+        let obj_uid = objects.len();
+        objects.push(Value::Dictionary(obj_dict));
+
+        if class_name == "UIRuntimeOutletConnection" || class_name == "UIRuntimeEventConnection" {
+            nib_connections_uids.push(obj_uid);
+        } else if class_name.starts_with("UI") && class_name.contains("Window") {
+            nib_visible_windows_uids.push(obj_uid);
+        } else {
+            nib_objects_uids.push(obj_uid);
+        }
+    }
+
+    let mut root = Dictionary::new();
+    root.insert("$version".to_string(), Value::Integer(100000.into()));
+    root.insert(
+        "$archiver".to_string(),
+        Value::String("NSKeyedArchiver".to_string()),
+    );
+    root.insert("$objects".to_string(), Value::Array(objects));
+
+    let mut top = Dictionary::new();
+    
+    if !nib_objects_uids.is_empty() {
+        let objects_uid = create_array_in_objects(&mut root, &nib_objects_uids);
+        top.insert("UINibObjectsKey".to_string(), Value::Uid(Uid::new(objects_uid)));
+        top.insert("UINibTopLevelObjectsKey".to_string(), Value::Uid(Uid::new(objects_uid)));
+    }
+    
+    if !nib_connections_uids.is_empty() {
+        let connections_uid = create_array_in_objects(&mut root, &nib_connections_uids);
+        top.insert("UINibConnectionsKey".to_string(), Value::Uid(Uid::new(connections_uid)));
+    }
+    
+    if !nib_visible_windows_uids.is_empty() {
+        let windows_uid = create_array_in_objects(&mut root, &nib_visible_windows_uids);
+        top.insert("UINibVisibleWindowsKey".to_string(), Value::Uid(Uid::new(windows_uid)));
+    }
+
+    root.insert("$top".to_string(), Value::Dictionary(top));
+
+    Ok(Value::Dictionary(root))
+}
+
+fn create_array_in_objects(root: &mut Dictionary, uids: &[usize]) -> u64 {
+    if let Some(Value::Array(objects)) = root.get_mut("$objects") {
+        let ns_array_class_uid = objects.len() as u64;
+        
+        let mut ns_array_class_dict = Dictionary::new();
+        ns_array_class_dict.insert("$classname".to_string(), Value::String("NSArray".to_string()));
+        ns_array_class_dict.insert(
+            "$classes".to_string(),
+            Value::Array(vec![
+                Value::String("NSArray".to_string()),
+                Value::String("NSObject".to_string()),
+            ]),
+        );
+        objects.push(Value::Dictionary(ns_array_class_dict));
+        
+        let array_obj_uid = objects.len() as u64;
+        let mut array_dict = Dictionary::new();
+        array_dict.insert("$class".to_string(), Value::Uid(Uid::new(ns_array_class_uid)));
+        
+        let uid_array: Vec<Value> = uids.iter().map(|&uid| Value::Uid(Uid::new(uid as u64))).collect();
+        array_dict.insert("NS.objects".to_string(), Value::Array(uid_array));
+        
+        objects.push(Value::Dictionary(array_dict));
+        array_obj_uid
+    } else {
+        0
+    }
+}
+
+fn parse_value_from_slice(slice: &[u8]) -> Result<Value, Error> {
+    if slice.is_empty() {
+        return Value::from_reader_xml(Cursor::new(b""));
+    }
+
+    if slice.starts_with(b"NIBArchive") {
+        log!("Detected NIBArchive format, converting to plist...");
+        return convert_nibarchive_to_plist(slice);
+    }
+
+    if slice.starts_with(b"bplist") {
+        Value::from_reader(Cursor::new(slice))
+    } else if slice.starts_with(b"<?xml") || slice.starts_with(b"<plist") {
+        Value::from_reader_xml(Cursor::new(slice))
+    } else {
+        Value::from_reader(Cursor::new(slice))
+            .or_else(|binary_err| Value::from_reader_xml(Cursor::new(slice)).or(Err(binary_err)))
+    }
+}
+
+fn parse_keyed_archive(slice: &[u8]) -> Result<Value, Error> {
+    parse_keyed_archive_inner(slice, 0)
+}
+
+fn parse_keyed_archive_inner(slice: &[u8], depth: usize) -> Result<Value, Error> {
+    let mut last_err = match parse_value_from_slice(slice) {
+        Ok(value) => return Ok(value),
+        Err(err) => err,
+    };
+
+    if depth >= MAX_ARCHIVE_PARSE_DEPTH {
+        return Err(last_err);
+    }
+
+    if slice.starts_with(b"\x1f\x8b") {
+        let mut decoder = GzDecoder::new(Cursor::new(slice));
+        let mut decompressed = Vec::new();
+        match decoder.read_to_end(&mut decompressed) {
+            Ok(_) => match parse_keyed_archive_inner(&decompressed, depth + 1) {
+                Ok(value) => return Ok(value),
+                Err(err) => last_err = err,
+            },
+            Err(decode_err) => {
+                log!(
+                    "NSKeyedUnarchiver: failed to gunzip archive: {}",
+                    decode_err
+                );
+            }
+        }
+    }
+
+    if slice.starts_with(b"\x78\x9c") || slice.starts_with(b"\x78\xda") {
+        let mut decoder = ZlibDecoder::new(Cursor::new(slice));
+        let mut decompressed = Vec::new();
+        match decoder.read_to_end(&mut decompressed) {
+            Ok(_) => match parse_keyed_archive_inner(&decompressed, depth + 1) {
+                Ok(value) => return Ok(value),
+                Err(err) => last_err = err,
+            },
+            Err(decode_err) => {
+                log!(
+                    "NSKeyedUnarchiver: failed to inflate zlib archive: {}",
+                    decode_err
+                );
+            }
+        }
+    }
+
+    if slice.starts_with(b"PK\x03\x04") {
+        if let Ok(mut archive) = ZipArchive::new(Cursor::new(slice)) {
+            for index in 0..archive.len() {
+                if let Ok(mut file) = archive.by_index(index) {
+                    if !file.is_file() {
+                        continue;
+                    }
+                    let mut decompressed = Vec::new();
+                    if file.read_to_end(&mut decompressed).is_ok() {
+                        match parse_keyed_archive_inner(&decompressed, depth + 1) {
+                            Ok(value) => return Ok(value),
+                            Err(err) => last_err = err,
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Err(last_err)
+}
 
 pub const CLASSES: ClassExports = objc_classes! {
 
@@ -92,12 +325,69 @@ pub const CLASSES: ClassExports = objc_classes! {
     assert!(host_obj.current_key.is_none());
     assert!(host_obj.plist.is_empty());
 
-    let plist = Value::from_reader(Cursor::new(slice)).unwrap();
-    let plist = plist.into_dictionary().unwrap();
-    assert!(plist["$version"].as_unsigned_integer() == Some(100000));
-    assert!(plist["$archiver"].as_string() == Some("NSKeyedArchiver"));
+    if slice.is_empty() {
+        log!("NSKeyedUnarchiver: Warning: Attempting to parse empty data");
+        release(env, this);
+        return nil;
+    }
 
-    let key_count = plist["$objects"].as_array().unwrap().len();
+    let format_hint = if slice.len() >= 6 {
+        if slice.starts_with(b"bplist") {
+            "binary plist"
+        } else if slice.starts_with(b"<?xml") {
+            "XML plist"
+        } else if slice.starts_with(b"\x1f\x8b") {
+            "gzip compressed"
+        } else if slice.starts_with(b"\x78\x9c") || slice.starts_with(b"\x78\xda") {
+            "zlib compressed"
+        } else if slice.starts_with(b"PK\x03\x04") {
+            "zip archive"
+        } else {
+            "unknown format"
+        }
+    } else {
+        "data too short"
+    };
+
+    let plist = match parse_keyed_archive(slice) {
+        Ok(plist) => plist,
+        Err(err) => {
+            log!("NSKeyedUnarchiver: Failed to parse keyed archive (detected format: {}): {}", format_hint, err);
+            log!("NSKeyedUnarchiver: Data length: {} bytes, first 16 bytes: {:?}",
+                 slice.len(),
+                 &slice[..slice.len().min(16)]);
+            release(env, this);
+            return nil;
+        }
+    };
+
+    let Some(plist) = plist.into_dictionary() else {
+        log!("NSKeyedUnarchiver: Warning: Root plist value is not a dictionary");
+        release(env, this);
+        return nil;
+    };
+
+    if plist.get("$version").and_then(|v| v.as_unsigned_integer()) != Some(100000) {
+        log!("NSKeyedUnarchiver: Warning: Unexpected archive version: {:?}",
+             plist.get("$version"));
+        release(env, this);
+        return nil;
+    }
+
+    if plist.get("$archiver").and_then(|v| v.as_string()) != Some("NSKeyedArchiver") {
+        log!("NSKeyedUnarchiver: Warning: Unexpected archiver: {:?}",
+             plist.get("$archiver"));
+        release(env, this);
+        return nil;
+    }
+
+    let Some(objects) = plist.get("$objects").and_then(|v| v.as_array()) else {
+        log!("NSKeyedUnarchiver: Warning: $objects is missing or not an array");
+        release(env, this);
+        return nil;
+    };
+
+    let key_count = objects.len();
 
     host_obj.already_unarchived = vec![None; key_count];
     host_obj.plist = plist;

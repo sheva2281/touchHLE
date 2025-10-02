@@ -7,13 +7,16 @@
 
 use super::ns_enumerator::{fast_enumeration_helper, NSFastEnumerationState};
 use super::ns_property_list_serialization::deserialize_plist_from_file;
-use super::{ns_keyed_unarchiver, ns_string, ns_url, NSInteger, NSNotFound, NSUInteger};
+use super::{
+    ns_keyed_unarchiver, ns_string, ns_url, NSComparisonResult, NSNotFound, NSRange, NSUInteger,
+};
 use crate::abi::{CallFromHost, GuestFunction};
 use crate::fs::GuestPath;
-use crate::mem::{MutPtr, MutVoidPtr};
+use crate::libc::stdlib::qsort::qsort_generic;
+use crate::mem::{ConstPtr, MutPtr, MutVoidPtr};
 use crate::objc::{
-    autorelease, id, msg, msg_class, nil, objc_classes, release, retain, ClassExports, HostObject,
-    NSZonePtr, SEL,
+    autorelease, id, msg, msg_class, msg_send, nil, objc_classes, release, retain, ClassExports,
+    HostObject, NSZonePtr, SEL,
 };
 use crate::Environment;
 
@@ -95,6 +98,11 @@ pub const CLASSES: ClassExports = objc_classes! {
         objects.push(next_arg);
     }
     let array = from_vec(env, objects);
+    autorelease(env, array)
+}
++ (id)arrayWithObjects:(ConstPtr<id>)objects_ptr count:(NSUInteger)count {
+    let array: id = msg![env; this alloc];
+    let array: id = msg![env; array initWithObjects:objects_ptr count:count];
     autorelease(env, array)
 }
 
@@ -203,6 +211,22 @@ pub const CLASSES: ClassExports = objc_classes! {
     autorelease(env, new)
 }
 
++ (id)arrayWithObjects:(id)firstObj, ...args {
+    retain(env, firstObj);
+    let mut objects = vec![firstObj];
+    let mut varargs = args.start();
+    loop {
+        let next_arg: id = varargs.next(env);
+        if next_arg.is_null() {
+            break;
+        }
+        retain(env, next_arg);
+        objects.push(next_arg);
+    }
+    let array = from_vec_mut(env, objects);
+    autorelease(env, array)
+}
+
 - (())addObjectsFromArray:(id)other { // NSArray*
     let enumerator: id = msg![env; other objectEnumerator];
     loop {
@@ -216,7 +240,9 @@ pub const CLASSES: ClassExports = objc_classes! {
 
 // NSCopying implementation
 - (id)copyWithZone:(NSZonePtr)_zone {
-    todo!(); // TODO: this should produce an immutable copy
+    let other: id = msg_class![env; NSArray alloc];
+    let other: id = msg![env; other initWithArray:this];
+    other
 }
 
 @end
@@ -285,6 +311,17 @@ pub const CLASSES: ClassExports = objc_classes! {
     this
 }
 
+- (id)initWithObjects:(ConstPtr<id>)objects_ptr count:(NSUInteger)count {
+    let mut objects = Vec::new();
+    for i in 0..count {
+        let obj: id = env.mem.read(objects_ptr + i);
+        retain(env, obj);
+        objects.push(obj);
+    }
+    env.objc.borrow_mut::<ArrayHostObject>(this).array = objects;
+    this
+}
+
 - (())dealloc {
     let host_object: &mut ArrayHostObject = env.objc.borrow_mut(this);
     let array = std::mem::take(&mut host_object.array);
@@ -294,6 +331,11 @@ pub const CLASSES: ClassExports = objc_classes! {
     }
 
     env.objc.dealloc_object(this, &mut env.mem)
+}
+
+// NSMutableCopying implementation
+- (id)mutableCopyWithZone:(NSZonePtr)_zone {
+    mutable_copy_inner(env, this)
 }
 
 - (id)objectEnumerator { // NSEnumerator*
@@ -329,6 +371,24 @@ pub const CLASSES: ClassExports = objc_classes! {
 
 - (id)description {
     build_description(env, this)
+}
+
+- (id)subarrayWithRange:(NSRange)range {
+    let mut tmp = Vec::new();
+    tmp.extend_from_slice(
+        &env.objc.borrow::<ArrayHostObject>(this).array[range.location as usize..(range.location + range.length) as usize]
+    );
+    for &obj in &tmp {
+        retain(env, obj);
+    }
+    let res = from_vec(env, tmp);
+    autorelease(env, res)
+}
+
+- (id)sortedArrayUsingSelector:(SEL)comparator {
+    let new = msg![env; this mutableCopy];
+    () = msg![env; new sortUsingSelector:comparator];
+    autorelease(env, new)
 }
 
 @end
@@ -383,15 +443,20 @@ pub const CLASSES: ClassExports = objc_classes! {
     this
 }
 
-// NSMutableCopying implementation
-- (id)mutableCopyWithZone:(NSZonePtr)_zone {
-    let mut_arr: id = msg_class![env; NSMutableArray alloc];
+// NSCopying implementation
+- (id)copyWithZone:(NSZonePtr)_zone {
+    let arr: id = msg_class![env; NSArray alloc];
     let array = env.objc.borrow::<ArrayHostObject>(this).array.clone();
     for &object in &array {
         retain(env, object);
     }
-    env.objc.borrow_mut::<ArrayHostObject>(this).array = array;
-    mut_arr
+    env.objc.borrow_mut::<ArrayHostObject>(arr).array = array;
+    arr
+}
+
+// NSMutableCopying implementation
+- (id)mutableCopyWithZone:(NSZonePtr)_zone {
+    mutable_copy_inner(env, this)
 }
 
 - (())dealloc {
@@ -424,11 +489,44 @@ pub const CLASSES: ClassExports = objc_classes! {
                 context:(MutVoidPtr)context {
     let host_object: &mut ArrayHostObject = env.objc.borrow_mut(this);
     let mut array = std::mem::take(&mut host_object.array);
-    array.sort_by(|&a, &b| {
-        let res: NSInteger = comparator.call_from_host(env, (a, b, context));
-        res.cmp(&0)
-    });
+    let len = array.len().try_into().unwrap();
+    let mut user_data = (env, &mut array);
+    qsort_generic(
+        &mut user_data,
+        len,
+        &mut |(env, array), l, r| {
+            let (l, r): (usize, usize) = (l.try_into().unwrap(), r.try_into().unwrap());
+            comparator.call_from_host(env, (array[l], array[r], context))
+        },
+        &mut |(_, array), l, r| {
+            let (l, r): (usize, usize) = (l.try_into().unwrap(), r.try_into().unwrap());
+            array.swap(l, r);
+        },
+    );
+    let (env, _) = user_data;
+    env.objc.borrow_mut::<ArrayHostObject>(this).array = array;
+}
 
+- (())sortUsingSelector:(SEL)comparator {
+    let host_object: &mut ArrayHostObject = env.objc.borrow_mut(this);
+    let mut array = std::mem::take(&mut host_object.array);
+    let len = array.len().try_into().unwrap();
+    let mut user_data = (env, &mut array);
+    qsort_generic(
+        &mut user_data,
+        len,
+        &mut |(env, array), l, r| {
+            let (l, r): (usize, usize) = (l.try_into().unwrap(), r.try_into().unwrap());
+            let res: NSComparisonResult = msg_send(env, (array[l], comparator, array[r]));
+            res
+        },
+        &mut |(_, array), l, r| {
+            let (l, r): (usize, usize) = (l.try_into().unwrap(), r.try_into().unwrap());
+            array.swap(l, r);
+        },
+    );
+
+    let (env, _) = user_data;
     env.objc.borrow_mut::<ArrayHostObject>(this).array = array;
 }
 
@@ -493,6 +591,12 @@ pub const CLASSES: ClassExports = objc_classes! {
     release(env, object)
 }
 
+- (())replaceObjectAtIndex:(NSUInteger)index withObject:(id)obj {
+    retain(env, obj);
+    let object = std::mem::replace(&mut env.objc.borrow_mut::<ArrayHostObject>(this).array[index as usize], obj);
+    release(env, object);
+}
+
 - (())removeLastObject {
     let object = env.objc.borrow_mut::<ArrayHostObject>(this).array.pop().unwrap();
     release(env, object)
@@ -539,6 +643,15 @@ pub const CLASSES: ClassExports = objc_classes! {
 /// The elements should already be "retained by" the `Vec`.
 pub fn from_vec(env: &mut Environment, objects: Vec<id>) -> id {
     let array: id = msg_class![env; NSArray alloc];
+    env.objc.borrow_mut::<ArrayHostObject>(array).array = objects;
+    array
+}
+
+/// Shortcut for host code, roughly equivalent to
+/// `[[NSMutableArray alloc] initWithObjects:count]` but without copying.
+/// The elements should already be "retained by" the `Vec`.
+pub fn from_vec_mut(env: &mut Environment, objects: Vec<id>) -> id {
+    let array: id = msg_class![env; NSMutableArray alloc];
     env.objc.borrow_mut::<ArrayHostObject>(array).array = objects;
     array
 }
@@ -600,4 +713,14 @@ fn object_enumerator_inner_helper(env: &mut Environment, arr: id, vec: Vec<id>) 
         .get_known_class("_touchHLE_NSArray_ObjectEnumerator", &mut env.mem);
     let enumerator = env.objc.alloc_object(class, host_object, &mut env.mem);
     autorelease(env, enumerator)
+}
+
+fn mutable_copy_inner(env: &mut Environment, arr: id) -> id {
+    let mut_arr: id = msg_class![env; NSMutableArray alloc];
+    let array = env.objc.borrow::<ArrayHostObject>(arr).array.clone();
+    for &object in &array {
+        retain(env, object);
+    }
+    env.objc.borrow_mut::<ArrayHostObject>(mut_arr).array = array;
+    mut_arr
 }

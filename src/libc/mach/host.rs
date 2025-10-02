@@ -8,10 +8,11 @@
 #![allow(non_camel_case_types)]
 
 use crate::dyld::FunctionExports;
-use crate::libc::mach_thread_info::{
-    kern_return_t, mach_msg_type_number_t, mach_port_t, natural_t, KERN_SUCCESS,
+use crate::libc::mach::core_types::natural_t;
+use crate::libc::mach::thread_info::{
+    kern_return_t, mach_msg_type_number_t, mach_port_t, KERN_SUCCESS,
 };
-use crate::mem::{guest_size_of, MutPtr, SafeRead};
+use crate::mem::{guest_size_of, MutPtr, SafeRead, PAGE_SIZE};
 use crate::{export_c_func, Environment};
 
 type host_t = mach_port_t;
@@ -24,7 +25,16 @@ type vm_size_t = natural_t;
 // per host so we could assert against it in our code.
 const MACH_HOST_SELF: host_name_port_t = 0x100c442e;
 
-pub const PAGE_SIZE: vm_size_t = 4096;
+// This roughly corresponds to 1.1GB of free vm memory out of 2GB.
+// Used in host_statistics function (returned in vm_statistics)
+// Also used to calcuate PHYSICAL_MEMORY (used by NSProcessInfo)
+const FREE_COUNT: natural_t = 287306;
+const ACTIVE_COUNT: natural_t = 159853;
+const INACTIVE_COUNT: natural_t = 23544;
+const WIRE_COUNT: natural_t = 47539;
+
+pub const PHYSICAL_MEMORY: natural_t =
+    (FREE_COUNT + ACTIVE_COUNT + INACTIVE_COUNT + WIRE_COUNT) * PAGE_SIZE;
 
 const HOST_VM_INFO: host_flavor_t = 2;
 
@@ -79,15 +89,14 @@ fn host_statistics(
     // those numbers are (mostly) meaningless.
     // In reality, this function is commonly used by apps to get
     // the amount of current free memory available.
-    // This output roughly corresponds to 1.1 Gb of free vm memory out of 2 Gb.
     // TODO: approximate size of current memory allocations and return them?
     env.mem.write(
         host_info_out.cast(),
         vm_statistics {
-            free_count: 287306,
-            active_count: 159853,
-            inactive_count: 23544,
-            wire_count: 47539,
+            free_count: FREE_COUNT,
+            active_count: ACTIVE_COUNT,
+            inactive_count: INACTIVE_COUNT,
+            wire_count: WIRE_COUNT,
             zero_fill_count: 33647739,
             reactivations: 129,
             pageins: 183535,

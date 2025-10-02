@@ -16,7 +16,7 @@ use crate::libc;
 pub const CONSTANT_LISTS: &[super::ConstantExports] = &[
     libc::ctype::CONSTANTS,
     libc::stdio::CONSTANTS,
-    libc::mach_init::CONSTANTS,
+    libc::mach::init::CONSTANTS,
     core_animation::ca_animation::CONSTANTS,
     core_animation::ca_layer::CONSTANTS,
     core_animation::ca_media_timing_function::CONSTANTS,
@@ -24,6 +24,8 @@ pub const CONSTANT_LISTS: &[super::ConstantExports] = &[
     core_foundation::cf_bundle::CONSTANTS,
     core_foundation::cf_dictionary::CONSTANTS,
     core_foundation::cf_locale::CONSTANTS,
+    core_foundation::cf_number::CONSTANTS,
+    core_foundation::cf_preferences::CONSTANTS,
     core_foundation::cf_run_loop::CONSTANTS,
     core_graphics::cg_affine_transform::CONSTANTS,
     core_graphics::cg_color_space::CONSTANTS,

@@ -139,9 +139,16 @@ fn panic_on_gl_errors(gles: &mut dyn GLES) {
 
 // Generic state manipulation
 fn glGetError(env: &mut Environment) -> GLenum {
+    let ignore_gl_errors = env.options.ignore_gl_errors;
     with_ctx_and_mem(env, |gles, _mem| {
         let err = unsafe { gles.GetError() };
         if err != 0 {
+            if ignore_gl_errors {
+                log_once!(
+                    "Warning: Guest error reporting is ignored for glGetError(), returning 0."
+                );
+                return 0;
+            }
             log!("Warning: glGetError() returned {:#x}", err);
         }
         err
@@ -199,6 +206,13 @@ fn glGetIntegerv(env: &mut Environment, pname: GLenum, params: MutPtr<GLint>) {
                 for (idx, &format) in SUPPORTED_COMPRESSED_TEXTURE_FORMATS.iter().enumerate() {
                     mem.write(params + idx as GuestUSize, format as _);
                 }
+            }
+            // MAX_COLOR_ATTACHMENTS_EXT or MAX_COLOR_ATTACHMENTS_OES
+            0x8cdf => {
+                // According to [OES_framebuffer_object](https://registry.khronos.org/OpenGL/extensions/OES/OES_framebuffer_object.txt),
+                // MAX_COLOR_ATTACHMENTS_OES is not supported in the extension,
+                // but we return 1 to match the real device.
+                mem.write(params, 1 as _);
             }
             _ => {
                 let params = mem.ptr_at_mut(params, 16 /* upper bound */);
@@ -340,6 +354,16 @@ fn glPolygonOffset(env: &mut Environment, factor: GLfloat, units: GLfloat) {
 fn glPolygonOffsetx(env: &mut Environment, factor: GLfixed, units: GLfixed) {
     with_ctx_and_mem(env, |gles, _mem| unsafe {
         gles.PolygonOffsetx(factor, units)
+    })
+}
+fn glSampleCoverage(env: &mut Environment, value: GLclampf, invert: GLboolean) {
+    with_ctx_and_mem(env, |gles, _mem| unsafe {
+        gles.SampleCoverage(value, invert)
+    })
+}
+fn glSampleCoveragex(env: &mut Environment, value: GLclampx, invert: GLboolean) {
+    with_ctx_and_mem(env, |gles, _mem| unsafe {
+        gles.SampleCoveragex(value, invert)
     })
 }
 fn glShadeModel(env: &mut Environment, mode: GLenum) {
@@ -1177,6 +1201,16 @@ fn glGenRenderbuffersOES(env: &mut Environment, n: GLsizei, renderbuffers: MutPt
         unsafe { gles.GenRenderbuffersOES(n, renderbuffers) }
     })
 }
+fn glIsFramebufferOES(env: &mut Environment, framebuffer: GLuint) -> GLboolean {
+    with_ctx_and_mem(env, |gles, _mem| unsafe {
+        gles.IsFramebufferOES(framebuffer)
+    })
+}
+fn glIsRenderbufferOES(env: &mut Environment, renderbuffer: GLuint) -> GLboolean {
+    with_ctx_and_mem(env, |gles, _mem| unsafe {
+        gles.IsRenderbufferOES(renderbuffer)
+    })
+}
 fn glBindFramebufferOES(env: &mut Environment, target: GLenum, framebuffer: GLuint) {
     with_ctx_and_mem(env, |gles, _mem| unsafe {
         gles.BindFramebufferOES(target, framebuffer)
@@ -1434,6 +1468,8 @@ pub const FUNCTIONS: FunctionExports = &[
     export_c_func!(glFrontFace(_)),
     export_c_func!(glPolygonOffset(_, _)),
     export_c_func!(glPolygonOffsetx(_, _)),
+    export_c_func!(glSampleCoverage(_, _)),
+    export_c_func!(glSampleCoveragex(_, _)),
     export_c_func!(glShadeModel(_)),
     export_c_func!(glScissor(_, _, _, _)),
     export_c_func!(glViewport(_, _, _, _)),
@@ -1541,6 +1577,8 @@ pub const FUNCTIONS: FunctionExports = &[
     // OES_framebuffer_object
     export_c_func!(glGenFramebuffersOES(_, _)),
     export_c_func!(glGenRenderbuffersOES(_, _)),
+    export_c_func!(glIsFramebufferOES(_)),
+    export_c_func!(glIsRenderbufferOES(_)),
     export_c_func!(glBindFramebufferOES(_, _)),
     export_c_func!(glBindRenderbufferOES(_, _)),
     export_c_func!(glRenderbufferStorageOES(_, _, _, _)),

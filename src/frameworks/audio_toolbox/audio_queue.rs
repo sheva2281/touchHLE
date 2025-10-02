@@ -59,6 +59,7 @@ struct AudioQueueHostObject {
     al_unused_buffers: Vec<ALuint>,
     aq_is_running_proc: Option<AudioQueuePropertyListenerProc>,
     aq_is_running_user_data: Option<MutVoidPtr>,
+    is_running_handler: bool,
 }
 
 /// Track whether the audio queue is meant to be running, in order to handle
@@ -177,6 +178,7 @@ pub fn AudioQueueNewOutput(
         al_unused_buffers: Vec::new(),
         aq_is_running_proc: None,
         aq_is_running_user_data: None,
+        is_running_handler: false,
     };
 
     let aq_ref = env.mem.alloc_and_write(OpaqueAudioQueue { _filler: 0 });
@@ -498,7 +500,7 @@ pub fn decode_buffer(
 
     match format.format_id {
         kAudioFormatAppleIMA4 => {
-            assert!(data_slice.len() % 34 == 0);
+            assert!(data_slice.len().is_multiple_of(34));
             let mut out_pcm = Vec::<u8>::with_capacity((data_slice.len() / 34) * 64 * 2);
             let packets = data_slice.chunks(34);
 
@@ -593,7 +595,7 @@ pub fn decode_buffer(
                 (2, 16) => al::AL_FORMAT_STEREO16,
                 (2, 32) => {
                     assert!((format.format_flags & kAudioFormatFlagIsSignedInteger) != 0);
-                    assert!(processed_data.len() % 4 == 0);
+                    assert!(processed_data.len().is_multiple_of(4));
                     let new_size = (processed_data.len() / 4) * 2; // size from 32-bit to 16-bit
                     let mut new_processed_data = Vec::<u8>::with_capacity(new_size);
                     for chunk in processed_data.chunks(4) {
@@ -751,6 +753,12 @@ pub fn handle_audio_queue(env: &mut Environment, in_aq: AudioQueueRef) {
     if !is_supported_audio_format(&host_object.format) {
         return;
     }
+    if host_object.is_running_handler {
+        // Already running, prevent infinite loop from reentrancy
+        return;
+    }
+
+    host_object.is_running_handler = true;
 
     let mut buffers_to_reuse = Vec::new();
 
@@ -817,6 +825,11 @@ pub fn handle_audio_queue(env: &mut Environment, in_aq: AudioQueueRef) {
             finish_stopping_audio_queue(env, in_aq);
         }
     }
+
+    let state = State::get(&mut env.framework_state);
+
+    let host_object = state.audio_queues.get_mut(&in_aq).unwrap();
+    host_object.is_running_handler = false;
 }
 
 fn AudioQueuePrime(

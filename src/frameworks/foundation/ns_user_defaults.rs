@@ -127,6 +127,23 @@ pub const CLASSES: ClassExports = objc_classes! {
     autorelease(env, dict)
 }
 
+- (id)valueForKey:(id)key { // NSString*
+    // This is not documented, but apparently this method
+    // is overridden for NSUserDefaults.
+    // Behaviour was confirmed on macOS.
+    // TODO: should we call `valueForKey:` on the app_domain_dict instead?
+    msg![env; this objectForKey:key]
+}
+- (())setValue:(id)val
+        forKey:(id)key { // NSString*
+    // This is not documented, but apparently this method
+    // is overridden for NSUserDefaults.
+    // Behaviour was confirmed on macOS.
+    // Only app domain gets affected here (this part wasn't verified).
+    let dict = env.objc.borrow::<NSUserDefaultsHostObject>(this).app_domain_dict;
+    msg![env; dict setValue:val forKey:key]
+}
+
 - (id)objectForKey:(id)key { // NSString*
     // TODO: check if order of searching is correct
     let app_domain_dict = env.objc.borrow::<NSUserDefaultsHostObject>(this).app_domain_dict;
@@ -236,6 +253,20 @@ pub const CLASSES: ClassExports = objc_classes! {
     let ns_number_class = env.objc.get_known_class("NSNumber", &mut env.mem);
     if env.objc.class_is_subclass_of(val_class, ns_number_class) {
         todo!();
+    }
+    nil
+}
+
+- (id)arrayForKey:(id)key {
+    log_dbg!("NSUserDefaults arrayForKey:{}", to_rust_string(env, key));
+    let val: id = msg![env; this objectForKey:key];
+    if val == nil {
+        return nil;
+    }
+    let val_class: Class = msg![env; val class];
+    let ns_array_class = env.objc.get_known_class("NSArray", &mut env.mem);
+    if env.objc.class_is_subclass_of(val_class, ns_array_class) {
+        return val;
     }
     nil
 }

@@ -11,9 +11,9 @@ use crate::frameworks::foundation::{ns_string, unichar};
 use crate::libc::clocale::{setlocale, LC_CTYPE};
 use crate::libc::errno::set_errno;
 use crate::libc::posix_io::{STDERR_FILENO, STDIN_FILENO, STDOUT_FILENO};
-use crate::libc::stdio::{fwrite, FILE};
-use crate::libc::stdlib::{atof_inner, strtol_inner, strtoul};
-use crate::libc::string::{strlen, strncpy};
+use crate::libc::stdio::{fwrite, getc, ungetc, EOF, FILE};
+use crate::libc::stdlib::{atof_inner_generic, str_to_int_inner_generic};
+use crate::libc::string::strlen;
 use crate::libc::wchar::wchar_t;
 use crate::mem::{ConstPtr, GuestUSize, Mem, MutPtr, MutVoidPtr, Ptr};
 use crate::objc::{id, msg, nil};
@@ -704,18 +704,62 @@ fn printf(env: &mut Environment, format: ConstPtr<u8>, args: DotDotDot) -> i32 {
 
 // TODO: more printf variants
 
+/// A simple wrapper around [sscanf_common_generic] for the case of C string.
 fn sscanf_common(
     env: &mut Environment,
     src: ConstPtr<u8>,
     format: ConstPtr<u8>,
-    mut args: VaList,
+    args: VaList,
 ) -> i32 {
-    let mut src_ptr = src.cast_mut();
+    sscanf_common_generic(
+        env,
+        |env, s, idx| Ok(env.mem.read(s + idx)),
+        |_, _, _| (),
+        src.cast_mut(),
+        format,
+        args,
+    )
+}
+
+/// Formatted scan implementation for `sscanf` family.
+///
+/// `getc_fn` is a callback to get next character from `subject`.
+/// 3rd parameter in this callback is a index which is safe to ignore
+/// (for example, in case of a file stream).
+/// Error signifies an abnormal stop of input,
+/// such as [crate::libc::stdio::EOF] in the file stream.
+/// Note: `'\0'` does not necessary expect to produce an error!
+///
+/// `ungetc_fn` is a callback to un-get character from `subject`.
+/// Could be ignored entirely (for example, in case of a string).
+///
+/// `subject` is either C string or file stream (for now).
+///
+/// `args` is the list of arguments to store produced outputs.
+///
+/// TODO: instead of `u8: From<T>` constraint, implement a conversion callback
+fn sscanf_common_generic<
+    T,
+    U,
+    F1: Fn(&mut Environment, MutPtr<U>, GuestUSize) -> Result<T, ()>,
+    F2: Fn(&mut Environment, MutPtr<U>, u8), // TODO: make last param generic too?
+>(
+    env: &mut Environment,
+    getc_fn: F1,
+    ungetc_fn: F2,
+    subject: MutPtr<U>,
+    format: ConstPtr<u8>,
+    mut args: VaList,
+) -> i32
+where
+    u8: From<T>,
+{
+    let mut src_char_idx = 0;
     let mut format_char_idx = 0;
 
     let mut matched_args = 0;
 
-    loop {
+    'outer: loop {
         let c = env.mem.read(format + format_char_idx);
         format_char_idx += 1;
 
@@ -723,17 +767,23 @@ fn sscanf_common(
             break;
         }
         if c != b'%' {
-            if isspace(env, format + format_char_idx - 1) && isspace(env, src_ptr.cast_const()) {
-                while isspace(env, src_ptr.cast_const()) {
-                    src_ptr += 1;
+            let mut cc: u8 = getc_fn(env, subject, src_char_idx).unwrap().into(); // TODO: EOF
+            if isspace(env, format + format_char_idx - 1) {
+                // "any single whitespace character in the format string
+                // consumes all available consecutive whitespace characters
+                // from the input"
+                while isspace_inner(cc) {
+                    src_char_idx += 1;
+                    cc = getc_fn(env, subject, src_char_idx).unwrap().into(); // TODO: EOF
                 }
+                // backtrack one
+                ungetc_fn(env, subject, cc);
                 continue;
             }
-            let cc = env.mem.read(src_ptr);
             if c != cc {
                 return matched_args;
             }
-            src_ptr += 1;
+            src_char_idx += 1;
             continue;
         }
 
@@ -777,9 +827,21 @@ fn sscanf_common(
 
         if ![b'[', b'c', b'n'].contains(&specifier) {
             // skip whitespaces
-            while isspace(env, src_ptr.cast_const()) {
-                src_ptr += 1;
+            let x = getc_fn(env, subject, src_char_idx);
+            if x.is_err() {
+                break 'outer;
             }
+            let mut cc: u8 = x.unwrap().into();
+            while isspace_inner(cc) {
+                src_char_idx += 1;
+                let x = getc_fn(env, subject, src_char_idx);
+                if x.is_err() {
+                    break 'outer;
+                }
+                cc = x.unwrap().into();
+            }
+            // backtrack one
+            ungetc_fn(env, subject, cc);
         }
 
         match specifier {
@@ -795,16 +857,23 @@ fn sscanf_common(
                     Some(lm) => {
                         match lm {
                             "h" => {
-                                // signed short* or unsigned short*
-                                match strtol_inner(env, src_ptr.cast_const(), base) {
+                                // signed short*
+                                let res = str_to_int_inner_generic(
+                                    env,
+                                    &getc_fn,
+                                    &ungetc_fn,
+                                    subject,
+                                    src_char_idx,
+                                    base,
+                                    if max_width > 0 { max_width } else { u32::MAX },
+                                    |s, base| i16::from_str_radix(s, base).unwrap_or(i16::MAX),
+                                    |num| num.checked_mul(-1).unwrap_or(i16::MIN),
+                                );
+                                match res {
                                     Ok((val, len)) => {
-                                        if max_width > 0 {
-                                            assert_eq!(max_width, len);
-                                        }
-                                        src_ptr += len;
+                                        src_char_idx += len;
                                         let c_int_ptr: ConstPtr<i16> = args.next(env);
-                                        env.mem
-                                            .write(c_int_ptr.cast_mut(), val.try_into().unwrap());
+                                        env.mem.write(c_int_ptr.cast_mut(), val);
                                     }
                                     Err(_) => break,
                                 }
@@ -812,21 +881,35 @@ fn sscanf_common(
                             _ => unimplemented!(),
                         }
                     }
-                    _ => match strtol_inner(env, src_ptr.cast_const(), base) {
-                        Ok((val, len)) => {
-                            src_ptr += len;
-                            let c_int_ptr: ConstPtr<i32> = args.next(env);
-                            env.mem.write(c_int_ptr.cast_mut(), val);
+                    _ => {
+                        let res = str_to_int_inner_generic(
+                            env,
+                            &getc_fn,
+                            &ungetc_fn,
+                            subject,
+                            src_char_idx,
+                            base,
+                            if max_width > 0 { max_width } else { u32::MAX },
+                            |s, base| i32::from_str_radix(s, base).unwrap_or(i32::MAX),
+                            |num| num.checked_mul(-1).unwrap_or(i32::MIN),
+                        );
+                        match res {
+                            Ok((val, len)) => {
+                                src_char_idx += len;
+                                let c_int_ptr: ConstPtr<i32> = args.next(env);
+                                env.mem.write(c_int_ptr.cast_mut(), val);
+                            }
+                            Err(_) => break,
                         }
-                        Err(_) => break,
-                    },
+                    }
                 }
             }
             b'f' => {
-                assert_eq!(max_width, 0);
-                let val = match atof_inner(env, src_ptr.cast_const()) {
+                assert_eq!(max_width, 0); // TODO
+                let res = atof_inner_generic(env, &getc_fn, &ungetc_fn, subject, src_char_idx);
+                let val = match res {
                     Ok((val, len)) => {
-                        src_ptr += len;
+                        src_char_idx += len;
                         val
                     }
                     Err(_) => break,
@@ -845,24 +928,32 @@ fn sscanf_common(
                     }
                 }
             }
-            b'x' | b'X' => {
+            b'x' | b'X' | b'u' => {
                 assert!(length_modifier.is_none());
-                // TODO: avoid scanning string upfront
-                let c_len: GuestUSize = strlen(env, src_ptr.cast_const());
-                let (val, len) = if max_width != 0 && max_width < c_len {
-                    assert!(max_width > 0);
-                    // TODO: avoid tmp string allocation
-                    let tmp: MutPtr<u8> = env.mem.alloc(max_width + 1).cast();
-                    _ = strncpy(env, tmp, src_ptr.cast_const(), max_width);
-                    let val: u32 = strtoul(env, tmp.cast_const(), Ptr::null(), 16);
-                    env.mem.free(tmp.cast());
-                    (val, max_width)
-                } else {
-                    (strtoul(env, src_ptr.cast_const(), Ptr::null(), 16), c_len)
+                let base: u32 = match specifier {
+                    b'x' | b'X' => 16,
+                    b'u' => 10,
+                    _ => unreachable!(),
                 };
-                src_ptr += len;
-                let c_u32_ptr: ConstPtr<u32> = args.next(env);
-                env.mem.write(c_u32_ptr.cast_mut(), val);
+                let res = str_to_int_inner_generic(
+                    env,
+                    &getc_fn,
+                    &ungetc_fn,
+                    subject,
+                    src_char_idx,
+                    base,
+                    if max_width > 0 { max_width } else { u32::MAX },
+                    |s, base| u32::from_str_radix(s, base).unwrap_or(u32::MAX),
+                    |num| num.wrapping_neg(),
+                );
+                match res {
+                    Ok((val, len)) => {
+                        src_char_idx += len;
+                        let c_u32_ptr: ConstPtr<u32> = args.next(env);
+                        env.mem.write(c_u32_ptr.cast_mut(), val);
+                    }
+                    Err(_) => break,
+                }
             }
             b'[' => {
                 assert_eq!(max_width, 0);
@@ -898,17 +989,18 @@ fn sscanf_common(
                 let mut dst_ptr: MutPtr<u8> = args.next(env);
                 let mut matched = false;
                 // Consume `src` while chars are not in the set
-                let mut cc = env.mem.read(src_ptr);
-                src_ptr += 1;
-                while set.contains(&cc) ^ inverted && env.mem.read(src_ptr - 1) != b'\0' {
+                let mut cc = getc_fn(env, subject, src_char_idx).unwrap().into(); // TODO: EOF
+                src_char_idx += 1;
+                while set.contains(&cc) ^ inverted && cc != b'\0' {
                     matched = true;
                     env.mem.write(dst_ptr, cc);
                     dst_ptr += 1;
-                    cc = env.mem.read(src_ptr);
-                    src_ptr += 1;
+                    cc = getc_fn(env, subject, src_char_idx).unwrap().into(); // TODO: EOF
+                    src_char_idx += 1;
                 }
                 // we need to backtrack one position
-                src_ptr -= 1;
+                ungetc_fn(env, subject, cc);
+                src_char_idx -= 1;
                 if matched {
                     env.mem.write(dst_ptr, b'\0');
                 } else {
@@ -918,21 +1010,31 @@ fn sscanf_common(
             b's' => {
                 assert_eq!(max_width, 0);
                 assert!(length_modifier.is_none());
-                let mut dst_ptr: MutPtr<u8> = args.next(env);
+                let orig_dst_ptr: MutPtr<u8> = args.next(env);
+                let mut dst_ptr: MutPtr<u8> = orig_dst_ptr;
                 loop {
-                    if !isspace(env, src_ptr.cast_const()) {
-                        let next = env.mem.read(src_ptr);
-                        if next == b'\0' {
+                    let x = getc_fn(env, subject, src_char_idx);
+                    if x.is_err() {
+                        break;
+                    }
+                    let cc: u8 = x.unwrap().into();
+                    if !isspace_inner(cc) {
+                        if cc == b'\0' {
                             break;
                         }
-                        env.mem.write(dst_ptr, next);
-                        src_ptr += 1;
+                        env.mem.write(dst_ptr, cc);
+                        src_char_idx += 1;
                         dst_ptr += 1;
                     } else {
+                        ungetc_fn(env, subject, cc);
                         break;
                     }
                 }
                 env.mem.write(dst_ptr, b'\0');
+                log_dbg!(
+                    "sscanf_common_generic read %s '{:?}'",
+                    env.mem.cstr_at_utf8(orig_dst_ptr)
+                );
             }
             // TODO: more specifiers
             _ => unimplemented!("Format character '{}'", specifier as char),
@@ -1005,6 +1107,48 @@ fn vsscanf(env: &mut Environment, src: ConstPtr<u8>, format: ConstPtr<u8>, arg: 
     sscanf_common(env, src, format, arg)
 }
 
+fn fscanf(
+    env: &mut Environment,
+    stream: MutPtr<FILE>,
+    format: ConstPtr<u8>,
+    args: DotDotDot,
+) -> i32 {
+    // TODO: handle errno properly
+    set_errno(env, 0);
+
+    log_dbg!(
+        "fscanf({:?}, {:?} ({:?}), ...)",
+        stream,
+        format,
+        env.mem.cstr_at_utf8(format)
+    );
+
+    let cc = getc(env, stream);
+    if cc == EOF {
+        return EOF;
+    } else {
+        assert_eq!(cc, ungetc(env, cc, stream));
+    }
+
+    sscanf_common_generic(
+        env,
+        |env, file, _idx| {
+            let c = getc(env, file);
+            if c == EOF {
+                Err::<u8, ()>(())
+            } else {
+                Ok(<i32 as TryInto<u8>>::try_into(c).unwrap())
+            }
+        },
+        |env, file, c| {
+            assert_eq!(c as i32, ungetc(env, c as i32, file));
+        },
+        stream,
+        format,
+        args.start(),
+    )
+}
+
 fn fprintf(
     env: &mut Environment,
     stream: MutPtr<FILE>,
@@ -1056,6 +1200,7 @@ pub const FUNCTIONS: FunctionExports = &[
     export_c_func!(sscanf(_, _, _)),
     export_c_func!(swscanf(_, _, _)),
     export_c_func!(vsscanf(_, _, _)),
+    export_c_func!(fscanf(_, _, _)),
     export_c_func!(snprintf(_, _, _, _)),
     export_c_func!(vprintf(_, _)),
     export_c_func!(vsnprintf(_, _, _, _)),
@@ -1073,6 +1218,9 @@ pub const FUNCTIONS: FunctionExports = &[
 // TODO: write proper libc's isspace()
 pub fn isspace(env: &mut Environment, src: ConstPtr<u8>) -> bool {
     let c = env.mem.read(src);
+    isspace_inner(c)
+}
+fn isspace_inner(c: u8) -> bool {
     // Rust's definition of whitespace excludes vertical tab, unlike C's
     c.is_ascii_whitespace() || c == b'\x0b'
 }

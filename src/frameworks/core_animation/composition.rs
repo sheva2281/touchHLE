@@ -8,6 +8,7 @@
 //! This is completely original; I don't think Apple document how this works and
 //! I haven't attempted to reverse-engineer the details. As such, it probably
 //! diverges wildly from what the real iPhone OS does.
+#![allow(clippy::zero_ptr)] // alas, as you know, opengl
 
 use super::ca_eagl_layer::find_fullscreen_eagl_layer;
 use super::ca_layer::CALayerHostObject;
@@ -18,8 +19,9 @@ use crate::gles::gles11_raw as gles11; // constants only
 use crate::gles::gles11_raw::types::*;
 use crate::gles::present::{present_frame, FpsCounter};
 use crate::gles::GLES;
+use crate::image::Image;
 use crate::matrix::Matrix;
-use crate::mem::Mem;
+use crate::mem::{Mem, SafeWrite};
 use crate::objc::{id, msg, msg_class, nil, ObjC};
 use crate::Environment;
 use std::time::{Duration, Instant};
@@ -29,6 +31,25 @@ pub(super) struct State {
     texture_framebuffer: Option<(GLuint, GLuint)>,
     recomposite_next: Option<Instant>,
     fps_counter: Option<FpsCounter>,
+    misc_gl_objects: Option<MiscGlObjects>,
+}
+
+struct MiscGlObjects {
+    /// Texture containing a single rounded corner.
+    rounded_corner_texture: GLuint,
+    /// [BASIC_SQUARE_POINTS], used as both vertex and texture co-ords for
+    /// drawing simple textured quads.
+    basic_square_buffer: GLuint,
+    /// [FLIPPED_SQUARE_POINTS], used as texture co-ords for some textured
+    /// quads.
+    flipped_square_buffer: GLuint,
+    /// 9-patch rounded corner texture co-ords (always the same).
+    rounded_vertex_buffer: GLuint,
+    /// 9-patch rounded corner vertex co-ords (varies with ratio of corner
+    /// radius to overall rectangle size).
+    rounded_tex_coord_buffer: GLuint,
+    /// Index buffer for 9-patch (first 6 elements can be used for square).
+    index_buffer: GLuint,
 }
 
 unsafe fn load_matrix(gles: &mut dyn GLES, matrix: Matrix<4>) {
@@ -199,18 +220,92 @@ pub fn recomposite_if_necessary(env: &mut Environment, force: bool) -> Option<In
         texture
     };
 
+    // Set up various other GL objects that will be reused on every frame.
+    let misc_gl_objects = env
+        .framework_state
+        .core_animation
+        .composition
+        .misc_gl_objects
+        .get_or_insert_with(|| {
+            let dimension = 512usize; // way larger than any reasonable corner
+            let mut image = Image::from_pixel_vec(
+                vec![255u8; dimension * dimension * 4],
+                (dimension as _, dimension as _),
+            );
+            image.round_corners(dimension as _, /* four_corners: */ false, /* add_sheen: */ false);
+
+            let mut rounded_corner_texture = 0;
+            unsafe {
+                gles.GenTextures(1, &mut rounded_corner_texture);
+                gles.BindTexture(gles11::TEXTURE_2D, rounded_corner_texture);
+                // GENERATE_MIPMAP must be set before the texture upload.
+                gles.TexParameteri(
+                    gles11::TEXTURE_2D,
+                    gles11::GENERATE_MIPMAP,
+                    gles11::TRUE as _,
+                );
+                upload_rgba8_pixels(gles, image.pixels(), (dimension as _, dimension as _));
+                gles.TexParameteri(
+                    gles11::TEXTURE_2D,
+                    gles11::TEXTURE_MIN_FILTER,
+                    gles11::LINEAR_MIPMAP_LINEAR as _,
+                );
+                gles.TexParameteri(
+                    gles11::TEXTURE_2D,
+                    gles11::TEXTURE_WRAP_S,
+                    gles11::CLAMP_TO_EDGE as _,
+                );
+                gles.TexParameteri(
+                    gles11::TEXTURE_2D,
+                    gles11::TEXTURE_WRAP_T,
+                    gles11::CLAMP_TO_EDGE as _,
+                );
+            }
+
+            let [basic_square_buffer, flipped_square_buffer, rounded_vertex_buffer, rounded_tex_coord_buffer, index_buffer] = unsafe {
+                let mut array_buffers = [0; 5];
+                gles.GenBuffers(5, array_buffers.as_mut_ptr());
+                array_buffers
+            };
+            unsafe {
+                gles.BindBuffer(gles11::ARRAY_BUFFER, basic_square_buffer);
+                upload_slice(gles, gles11::ARRAY_BUFFER, &BASIC_SQUARE_POINTS, gles11::STATIC_DRAW);
+                gles.BindBuffer(gles11::ARRAY_BUFFER, flipped_square_buffer);
+                upload_slice(gles, gles11::ARRAY_BUFFER, &FLIPPED_SQUARE_POINTS, gles11::STATIC_DRAW);
+                gles.BindBuffer(gles11::ARRAY_BUFFER, rounded_vertex_buffer);
+                upload_slice(gles, gles11::ARRAY_BUFFER, &[0f32; FLOATS_PER_9PATCH], gles11::DYNAMIC_DRAW);
+                gles.BindBuffer(gles11::ARRAY_BUFFER, rounded_tex_coord_buffer);
+                upload_slice(
+                    gles,
+                    gles11::ARRAY_BUFFER,
+                    &make_9patch_coords([0.0, 1.0, 1.0, 0.0], [0.0, 1.0, 1.0, 0.0]),
+                    gles11::STATIC_DRAW,
+                );
+                // Prevent accidental subsequent use.
+                gles.BindBuffer(gles11::ARRAY_BUFFER, 0);
+
+                gles.BindBuffer(gles11::ELEMENT_ARRAY_BUFFER, index_buffer);
+                upload_slice(gles, gles11::ELEMENT_ARRAY_BUFFER, &make_9patch_indices(), gles11::STATIC_DRAW);
+                // Prevent accidental subsequent use.
+                gles.BindBuffer(gles11::ELEMENT_ARRAY_BUFFER, 0);
+            }
+
+            MiscGlObjects {
+                rounded_corner_texture,
+                basic_square_buffer,
+                flipped_square_buffer,
+                rounded_vertex_buffer,
+                rounded_tex_coord_buffer,
+                index_buffer,
+            }
+        });
+
     // Clear the framebuffer and set up state to prepare for rendering
     unsafe {
         gles.Viewport(0, 0, fb_width as _, fb_height as _);
         gles.ClearColor(0.0, 0.0, 0.0, 1.0);
         gles.Clear(gles11::COLOR_BUFFER_BIT);
         gles.Color4f(1.0, 1.0, 1.0, 1.0);
-
-        // Everything drawn later will be this same unit-square quad.
-        gles.BindBuffer(gles11::ARRAY_BUFFER, 0);
-        let vertices: [f32; 12] = [0.0, 1.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 1.0, 0.0];
-        gles.EnableClientState(gles11::VERTEX_ARRAY);
-        gles.VertexPointer(2, gles11::FLOAT, 0, vertices.as_ptr() as *const GLvoid);
 
         gles.MatrixMode(gles11::PROJECTION);
         // Scale down screen-space to normalized device co-ordinates, shift the
@@ -228,11 +323,22 @@ pub fn recomposite_if_necessary(env: &mut Environment, force: bool) -> Option<In
         );
         gles.MatrixMode(gles11::MODELVIEW);
         gles.LoadIdentity();
+
+        // One index buffer to rule them all
+        gles.BindBuffer(gles11::ELEMENT_ARRAY_BUFFER, misc_gl_objects.index_buffer);
     }
 
     // Here's where the actual drawing happens
     unsafe {
-        composite_layer_recursive(gles, &mut env.objc, &env.mem, root_layer, origin, opacity);
+        composite_layer_recursive(
+            gles,
+            &mut env.objc,
+            &env.mem,
+            misc_gl_objects,
+            root_layer,
+            origin,
+            opacity,
+        );
     }
 
     // Clean up some GL state
@@ -244,6 +350,8 @@ pub fn recomposite_if_necessary(env: &mut Environment, force: bool) -> Option<In
         gles.LoadIdentity();
         gles.MatrixMode(gles11::MODELVIEW);
         gles.LoadIdentity();
+        gles.BindBuffer(gles11::ARRAY_BUFFER, 0);
+        gles.BindBuffer(gles11::ELEMENT_ARRAY_BUFFER, 0);
         assert_eq!(gles.GetError(), 0);
     }
 
@@ -295,6 +403,7 @@ unsafe fn composite_layer_recursive(
     gles: &mut dyn GLES,
     objc: &mut ObjC,
     mem: &Mem,
+    misc: &MiscGlObjects,
     layer: id,
     origin: CGPoint,
     opacity: CGFloat,
@@ -348,8 +457,60 @@ unsafe fn composite_layer_recursive(
         gles.Color4f(r * opacity, g * opacity, b * opacity, a * opacity);
         gles.Enable(gles11::BLEND);
         gles.BlendFunc(gles11::ONE, gles11::ONE_MINUS_SRC_ALPHA);
-        gles.Disable(gles11::TEXTURE_2D);
-        gles.DrawArrays(gles11::TRIANGLES, 0, 6);
+
+        let radius = host_obj.corner_radius;
+        if radius == 0.0 {
+            gles.Disable(gles11::TEXTURE_2D);
+            gles.DisableClientState(gles11::TEXTURE_COORD_ARRAY);
+
+            gles.EnableClientState(gles11::VERTEX_ARRAY);
+            gles.BindBuffer(gles11::ARRAY_BUFFER, misc.basic_square_buffer);
+            gles.VertexPointer(2, gles11::FLOAT, 0, 0 as *const GLvoid);
+
+            gles.DrawElements(
+                gles11::TRIANGLES,
+                SQUARE_INDICES.len() as _,
+                gles11::UNSIGNED_BYTE,
+                0 as *const GLvoid,
+            );
+        } else {
+            gles.Enable(gles11::TEXTURE_2D);
+            gles.BindTexture(gles11::TEXTURE_2D, misc.rounded_corner_texture);
+            gles.EnableClientState(gles11::TEXTURE_COORD_ARRAY);
+            gles.BindBuffer(gles11::ARRAY_BUFFER, misc.rounded_tex_coord_buffer);
+            gles.TexCoordPointer(2, gles11::FLOAT, 0, 0 as *const GLvoid);
+
+            gles.EnableClientState(gles11::VERTEX_ARRAY);
+            gles.BindBuffer(gles11::ARRAY_BUFFER, misc.rounded_vertex_buffer);
+            upload_slice(
+                gles,
+                gles11::ARRAY_BUFFER,
+                &make_9patch_coords(
+                    [
+                        0.0,
+                        (radius / host_obj.bounds.size.width).min(0.5),
+                        (1.0 - radius / host_obj.bounds.size.width).max(0.5),
+                        1.0,
+                    ],
+                    [
+                        0.0,
+                        (radius / host_obj.bounds.size.height).min(0.5),
+                        (1.0 - radius / host_obj.bounds.size.height).max(0.5),
+                        1.0,
+                    ],
+                ),
+                gles11::DYNAMIC_DRAW,
+            );
+            gles.VertexPointer(2, gles11::FLOAT, 0, 0 as *const GLvoid);
+
+            gles.DrawElements(
+                gles11::TRIANGLES,
+                INDICES_PER_9PATCH as _,
+                gles11::UNSIGNED_BYTE,
+                0 as *const GLvoid,
+            );
+        };
+
         true
     };
 
@@ -429,17 +590,29 @@ unsafe fn composite_layer_recursive(
             gles.BlendFunc(gles11::ONE, gles11::ONE_MINUS_SRC_ALPHA);
         }
 
+        gles.EnableClientState(gles11::VERTEX_ARRAY);
+        gles.BindBuffer(gles11::ARRAY_BUFFER, misc.basic_square_buffer);
+        gles.VertexPointer(2, gles11::FLOAT, 0, 0 as *const GLvoid);
+
+        gles.EnableClientState(gles11::TEXTURE_COORD_ARRAY);
         // Normal images will have top-to-bottom row order, but OpenGL ES
         // expects bottom-to-top, so flip the UVs in that case.
-        let tex_coords: [f32; 12] = if host_obj.contents != nil {
-            [0.0, 1.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 1.0, 0.0]
-        } else {
-            [0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0, 0.0, 0.0, 1.0, 1.0, 1.0]
-        };
-        gles.EnableClientState(gles11::TEXTURE_COORD_ARRAY);
-        gles.TexCoordPointer(2, gles11::FLOAT, 0, tex_coords.as_ptr() as *const GLvoid);
+        gles.BindBuffer(
+            gles11::ARRAY_BUFFER,
+            if host_obj.contents != nil {
+                misc.basic_square_buffer
+            } else {
+                misc.flipped_square_buffer
+            },
+        );
+        gles.TexCoordPointer(2, gles11::FLOAT, 0, 0 as *const GLvoid);
         gles.Enable(gles11::TEXTURE_2D);
-        gles.DrawArrays(gles11::TRIANGLES, 0, 6);
+        gles.DrawElements(
+            gles11::TRIANGLES,
+            SQUARE_INDICES.len() as _,
+            gles11::UNSIGNED_BYTE,
+            0 as *const GLvoid,
+        );
     }
 
     // avoid holding mutable borrow while recursing
@@ -450,12 +623,71 @@ unsafe fn composite_layer_recursive(
             gles,
             objc,
             mem,
+            misc,
             child_layer,
             /* origin: */ next_origin,
             opacity,
         )
     }
     objc.borrow_mut::<CALayerHostObject>(layer).sublayers = sublayers;
+}
+
+const FLOATS_PER_POINT: usize = 2;
+const BASIC_SQUARE_POINTS: [f32; 4 * FLOATS_PER_POINT] = [0.0, 1.0, 0.0, 0.0, 1.0, 1.0, 1.0, 0.0];
+const SQUARE_INDICES: [u8; 6] = [0, 1, 2, 2, 1, 3];
+const FLIPPED_SQUARE_POINTS: [f32; 4 * FLOATS_PER_POINT] = [0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0, 1.0];
+const FLOATS_PER_9PATCH: usize = BASIC_SQUARE_POINTS.len() * 3 * 3;
+const INDICES_PER_9PATCH: usize = SQUARE_INDICES.len() * 3 * 3;
+
+fn make_9patch_coords(x_edges: [f32; 4], y_edges: [f32; 4]) -> [f32; FLOATS_PER_9PATCH] {
+    let mut out_points = [0.0; FLOATS_PER_9PATCH];
+    for (i, out_points_chunk) in out_points
+        .chunks_exact_mut(BASIC_SQUARE_POINTS.len())
+        .enumerate()
+    {
+        let (x, y) = (i % 3, i / 3);
+
+        for (dst_xy, src_xy) in out_points_chunk
+            .chunks_exact_mut(2)
+            .zip(BASIC_SQUARE_POINTS.chunks_exact(2))
+        {
+            let (x1, x2) = (x_edges[x], x_edges[x + 1]);
+            let (y1, y2) = (y_edges[y], y_edges[y + 1]);
+            dst_xy[0] = x1 + src_xy[0] * (x2 - x1);
+            dst_xy[1] = y1 + src_xy[1] * (y2 - y1);
+        }
+    }
+    out_points
+}
+
+fn make_9patch_indices() -> [u8; INDICES_PER_9PATCH] {
+    let mut out_indices = [0; SQUARE_INDICES.len() * 3 * 3];
+    for (i, out_indices_chunk) in out_indices
+        .chunks_exact_mut(SQUARE_INDICES.len())
+        .enumerate()
+    {
+        for (out_index, in_index) in out_indices_chunk
+            .iter_mut()
+            .zip(SQUARE_INDICES.iter().copied())
+        {
+            *out_index = in_index + i as u8 * (BASIC_SQUARE_POINTS.len() / FLOATS_PER_POINT) as u8;
+        }
+    }
+    out_indices
+}
+
+unsafe fn upload_slice<T: SafeWrite>(
+    gles: &mut dyn GLES,
+    target: GLenum,
+    data: &[T],
+    usage: GLenum,
+) {
+    gles.BufferData(
+        target,
+        std::mem::size_of_val(data) as _,
+        data.as_ptr() as *const _,
+        usage,
+    )
 }
 
 unsafe fn upload_rgba8_pixels(gles: &mut dyn GLES, pixels: &[u8], dimensions: (u32, u32)) {

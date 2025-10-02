@@ -205,6 +205,9 @@ impl<T: SafeRead> SafeWrite for T {}
 
 type Bytes = [u8; 1 << 32];
 
+pub const PAGE_SIZE: GuestUSize = 4096;
+pub const PAGE_SIZE_ALIGN_MASK: GuestUSize = 0xfff;
+
 /// The type that owns the guest memory and provides accessors for it.
 pub struct Mem {
     /// This array is 4GiB in size so that it can cover the entire 32-bit
@@ -274,7 +277,11 @@ impl Mem {
     pub fn new() -> Mem {
         // This will hopefully get the host OS to lazily allocate the memory.
         let layout = std::alloc::Layout::new::<Bytes>();
+        // TODO: align memory to guest page size
+        // Right now, if aligned, will cause OOM on low end Android devices.
+        // See relevant [Github's issue](https://github.com/touchHLE/touchHLE/issues/498)
         let bytes = unsafe { std::alloc::alloc_zeroed(layout) as *mut Bytes };
+        assert!(!bytes.is_null());
 
         let allocator = allocator::Allocator::new();
 
@@ -316,7 +323,7 @@ impl Mem {
         //        segments they shouldn't be able to. Adding that would fix
         //        this, along with removing this special case.
         assert!(self.null_segment_size == 0);
-        assert!(new_null_segment_size % 0x1000 == 0);
+        assert!(new_null_segment_size.is_multiple_of(0x1000));
         self.allocator
             .reserve(allocator::Chunk::new(0, new_null_segment_size));
         self.null_segment_size = new_null_segment_size;
@@ -523,6 +530,13 @@ impl Mem {
             self.bytes_at_mut(ptr.cast(), size).fill(0);
         }
         log_dbg!("Allocated {:?} ({:#x} bytes)", ptr, size);
+        ptr
+    }
+
+    /// Allocate `size` bytes initialized to 0.
+    pub fn calloc(&mut self, size: GuestUSize) -> MutVoidPtr {
+        let ptr = self.alloc(size);
+        self.bytes_at_mut(ptr.cast(), size).fill(0);
         ptr
     }
 

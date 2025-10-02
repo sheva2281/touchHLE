@@ -12,300 +12,96 @@
 
 // For convenience, let's just include the other source files.
 
+#include "AutoReleasePoolTest.m"
 #include "CGAffineTransform.c"
+#import "SyncTester.h"
 
 // === Declarations ===
 
 // We don't have any system headers for iPhone OS, so we must declare everything
 // ourselves rather than #include'ing.
 
-// <stddef.h>
-#define NULL ((void *)0)
-typedef unsigned long size_t;
-typedef int wchar_t;
+#include <CoreFoundation/CFBase.h>
+#include <CoreFoundation/CFDictionary.h>
+#include <CoreFoundation/CFNumber.h>
+#include <CoreFoundation/CFString.h>
+#include <CoreFoundation/CFURL.h>
+#include <arpa/inet.h>
+#include <dirent.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <fenv.h>
+#include <locale.h>
+#include <math.h>
+#include <pthread.h>
+#include <semaphore.h>
+#include <setjmp.h>
+#include <stdarg.h>
+#include <stddef.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <wchar.h>
 
-// <errno.h>
-int *__error(void);
-#define errno (*__error())
+// `CGDataProvider.h`
 
-// <stdarg.h>
-typedef __builtin_va_list va_list;
-#define va_start(a, b) __builtin_va_start(a, b)
-#define va_arg(a, b) __builtin_va_arg(a, b)
-#define va_end(a) __builtin_va_end(a)
+typedef struct _CGDataProvider *CGDataProviderRef;
 
-// <stdio.h>
-typedef struct FILE FILE;
-FILE *fopen(const char *, const char *);
-int fclose(FILE *);
-int sscanf(const char *, const char *, ...);
-int printf(const char *, ...);
-int vsnprintf(char *, size_t, const char *, va_list);
-int swprintf(wchar_t *, size_t, const wchar_t *, ...);
-size_t fwrite(const void *, size_t, size_t, FILE *);
-size_t fread(void *, size_t, size_t, FILE *);
-int getc(FILE *);
-int ungetc(int, FILE *);
+CGDataProviderRef CGDataProviderCreateWithCFData(CFDataRef);
+CFDataRef CGDataProviderCopyData(CGDataProviderRef);
 
-// <stdlib.h>
-#define EXIT_SUCCESS 0
-#define EXIT_FAILURE 1
-void exit(int);
-void free(void *);
-void *malloc(size_t);
-void qsort(void *, size_t, size_t, int (*)(const void *, const void *));
-void *realloc(void *, size_t);
-double atof(const char *);
-float strtof(const char *, char **);
-long strtol(const char *, char **, int);
-unsigned long strtoul(const char *, char **, int);
-char *realpath(const char *, char *);
-size_t mbstowcs(wchar_t *, const char *, size_t);
-size_t wcstombs(char *, const wchar_t *, size_t);
+// `CGGeometry.h`
 
-// <string.h>
-void *memset(void *, int, size_t);
-int memcmp(const void *, const void *, size_t);
-void *memmove(void *, const void *, size_t);
-int strcmp(const char *, const char *);
-char *strncpy(char *, const char *, size_t);
-char *strncat(char *, const char *, size_t);
-size_t strlcpy(char *, const char *, size_t);
-char *strchr(const char *s, int c);
-char *strrchr(const char *s, int c);
-size_t strlen(const char *);
-int strncmp(const char *, const char *, size_t);
-size_t strcspn(const char *, const char *);
-char *strdup(const char *);
+CGFloat CGRectGetMinX(CGRect);
+CGFloat CGRectGetMaxX(CGRect);
+CGFloat CGRectGetMinY(CGRect);
+CGFloat CGRectGetMaxY(CGRect);
+CGFloat CGRectGetHeight(CGRect);
+CGFloat CGRectGetWidth(CGRect);
 
-// <unistd.h>
-typedef unsigned int __uint32_t;
-typedef __uint32_t useconds_t;
-int chdir(const char *);
-char *getcwd(char *, size_t);
-int usleep(useconds_t);
+// `CGImage.h`
 
-// <fcntl.h>
-#define O_RDONLY 0x00000000
-#define O_WRONLY 0x00000001
-#define O_RDWR 0x00000002
-#define O_CREAT 0x00000200
+typedef struct _CGImage *CGImageRef;
 
-int open(const char *, int, ...);
-int close(int);
-
-// <pthread.h>
-typedef struct opaque_pthread_t opaque_pthread_t;
-typedef struct opaque_pthread_t *__pthread_t;
-typedef __pthread_t pthread_t;
-
-typedef struct opaque_pthread_attr_t opaque_pthread_attr_t;
-typedef struct opaque_pthread_attr_t *__pthread_attr_t;
-typedef __pthread_attr_t pthread_attr_t;
-
-struct _opaque_pthread_mutex_t {
-  long __sig;
-  char __opaque[40];
-};
-typedef struct _opaque_pthread_mutex_t __pthread_mutex_t;
-typedef __pthread_mutex_t pthread_mutex_t;
-
-typedef struct opaque_pthread_mutexattr_t opaque_pthread_mutexattr_t;
-typedef struct opaque_pthread_mutexattr_t *__pthread_mutexattr_t;
-typedef __pthread_mutexattr_t pthread_mutexattr_t;
-
-typedef struct opaque_pthread_cond_t opaque_pthread_cond_t;
-typedef struct opaque_pthread_cond_t *__pthread_cond_t;
-typedef __pthread_cond_t pthread_cond_t;
-
-typedef struct opaque_pthread_condattr_t opaque_pthread_condattr_t;
-typedef struct opaque_pthread_condattr_t *__pthread_condattr_t;
-typedef __pthread_condattr_t pthread_condattr_t;
-
-int pthread_create(pthread_t *, const pthread_attr_t *, void *(*)(void *),
-                   void *);
-int pthread_join(pthread_t thread, void **value_ptr);
-
-int pthread_cond_init(pthread_cond_t *, const pthread_condattr_t *);
-int pthread_cond_signal(pthread_cond_t *);
-int pthread_cond_wait(pthread_cond_t *, pthread_mutex_t *);
-
-int pthread_mutex_init(pthread_mutex_t *, const pthread_mutexattr_t *);
-int pthread_mutex_lock(pthread_mutex_t *);
-int pthread_mutex_unlock(pthread_mutex_t *);
-
-// <semaphore.h>
-#define SEM_FAILED ((sem_t *)-1)
-typedef int sem_t;
-int sem_close(sem_t *);
-sem_t *sem_open(const char *, int, ...);
-int sem_post(sem_t *);
-int sem_trywait(sem_t *);
-int sem_unlink(const char *);
-int sem_wait(sem_t *);
-
-// <locale.h>
-#define LC_ALL 0
-#define LC_COLLATE 1
-#define LC_CTYPE 2
-#define LC_MONETARY 3
-#define LC_NUMERIC 4
-#define LC_TIME 5
-#define LC_MESSAGES 6
-char *setlocale(int category, const char *locale);
-
-#ifdef DEFINE_ME_WHEN_BUILDING_ON_MACOS
-typedef long _register_t; // 64-bit definition
-#else
-typedef int _register_t;
-#endif
-
-// <setjmp.h>
-#define _JBLEN (10 + 16 + 2)
-typedef _register_t jmp_buf[_JBLEN];
-int setjmp(jmp_buf env);
-void longjmp(jmp_buf env, int val);
-
-// <ctype.h>
-int __maskrune(wchar_t, unsigned long);
-
-// <dirent.h>
-typedef struct {
-  int _unused;
-} DIR;
-struct dirent {
-  char _unused[21]; // TODO
-  char d_name[1024];
-};
-DIR *opendir(const char *);
-struct dirent *readdir(DIR *);
-int closedir(DIR *);
-int scandir(const char *, struct dirent ***, int (*)(struct dirent *),
-            int (*)(const void *, const void *));
-
-// <wchar.h>
-int swscanf(const wchar_t *, const wchar_t *, ...);
-
-// <math.h>
-long int lrint(double);
-long int lrintf(float);
-double ldexp(double, int);
-float ldexpf(float, int);
-float frexpf(float, int *);
-double frexp(double, int *);
-double fabs(double);
-
-// <inet.h>
-typedef unsigned int socklen_t;
-typedef unsigned int in_addr_t;
-struct in_addr {
-  in_addr_t s_addr;
-};
-in_addr_t inet_addr(const char *);
-const char *inet_ntop(int, const void *, char *, socklen_t);
-int inet_pton(int, const char *, void *);
-
-// `CFBase.h`
-
-typedef unsigned char Boolean;
-typedef const void *CFTypeRef;
-typedef const struct _CFAllocator *CFAllocatorRef;
-typedef unsigned int CFStringEncoding;
-typedef unsigned long CFHashCode;
-typedef signed long CFIndex;
-typedef struct {
-  CFIndex location;
-  CFIndex length;
-} CFRange;
-typedef unsigned long CFOptionFlags;
-typedef const struct _CFDictionary *CFDictionaryRef;
-typedef const struct _CFString *CFStringRef;
-typedef const struct _CFString *CFMutableStringRef;
-typedef const struct _CFURL *CFURLRef;
-
-CFTypeRef CFRetain(CFTypeRef cf);
-void CFRelease(CFTypeRef cf);
-Boolean CFEqual(CFTypeRef cf1, CFTypeRef cf2);
-CFHashCode CFHash(CFTypeRef cf);
-
-// `CFString.h`
-
-enum { kCFStringEncodingASCII = 0x600 };
-
-typedef int CFComparisonResult;
-typedef unsigned int CFStringCompareFlags;
-
-void CFStringAppendFormat(CFMutableStringRef s, CFDictionaryRef fo,
-                          CFStringRef format, ...);
-CFMutableStringRef CFStringCreateMutable(CFAllocatorRef alloc, CFIndex max_len);
-CFStringRef CFStringCreateWithCString(CFAllocatorRef alloc, const char *cStr,
-                                      CFStringEncoding encoding);
-CFComparisonResult CFStringCompare(CFStringRef a, CFStringRef b,
-                                   CFStringCompareFlags flags);
-CFRange CFStringFind(CFStringRef theString, CFStringRef stringToFind,
-                     CFOptionFlags compareOptions);
-
-// `CFDictionary.h`
-
-typedef const struct _CFDictionary *CFMutableDictionaryRef;
-
-typedef const void *(*CFDictionaryRetainCallBack)(CFAllocatorRef alloc,
-                                                  const void *value);
-typedef void (*CFDictionaryReleaseCallBack)(CFAllocatorRef alloc,
-                                            const void *val);
-typedef CFStringRef (*CFDictionaryCopyDescriptionCallBack)(const void *val);
-typedef Boolean (*CFDictionaryEqualCallBack)(const void *val1,
-                                             const void *val2);
-typedef CFHashCode (*CFDictionaryHashCallBack)(const void *val);
-
-typedef struct {
-  CFIndex version;
-  CFDictionaryRetainCallBack retain;
-  CFDictionaryReleaseCallBack release;
-  CFDictionaryCopyDescriptionCallBack copyDescription;
-  CFDictionaryEqualCallBack equal;
-  CFDictionaryHashCallBack hash;
-} CFDictionaryKeyCallBacks;
-
-typedef struct {
-  CFIndex version;
-  CFDictionaryRetainCallBack retain;
-  CFDictionaryReleaseCallBack release;
-  CFDictionaryCopyDescriptionCallBack copyDescription;
-  CFDictionaryEqualCallBack equal;
-} CFDictionaryValueCallBacks;
-
-CFMutableDictionaryRef
-CFDictionaryCreateMutable(CFAllocatorRef allocator, CFIndex capacity,
-                          const CFDictionaryKeyCallBacks *keyCallBacks,
-                          const CFDictionaryValueCallBacks *valueCallBacks);
-void CFDictionaryAddValue(CFMutableDictionaryRef dict, const void *key,
-                          const void *value);
-void CFDictionarySetValue(CFMutableDictionaryRef dict, const void *key,
-                          const void *value);
-void CFDictionaryRemoveValue(CFMutableDictionaryRef dict, const void *key);
-void CFDictionaryRemoveAllValues(CFMutableDictionaryRef dict);
-const void *CFDictionaryGetValue(CFDictionaryRef dict, const void *key);
-CFIndex CFDictionaryGetCount(CFDictionaryRef dict);
-void CFDictionaryGetKeysAndValues(CFDictionaryRef dict, const void **keys,
-                                  const void **values);
-
-// `CFURL.h`
-
-CFURLRef CFURLCreateFromFileSystemRepresentation(CFAllocatorRef allocator,
-                                                 const char *buffer,
-                                                 CFIndex bufLen,
-                                                 Boolean isDirectory);
-CFStringRef CFURLCopyFileSystemPath(CFURLRef anURL, CFIndex pathStyle);
-
-CFURLRef CFURLCreateCopyAppendingPathComponent(CFAllocatorRef allocator,
-                                               CFURLRef url,
-                                               CFStringRef pathComponent,
-                                               Boolean isDirectory);
-CFURLRef CFURLCreateCopyDeletingLastPathComponent(CFAllocatorRef allocator,
-                                                  CFURLRef url);
+CGImageRef CGImageCreateWithJPEGDataProvider(CGDataProviderRef, const CGFloat *,
+                                             bool, int);
+size_t CGImageGetWidth(CGImageRef);
+size_t CGImageGetHeight(CGImageRef);
+CGDataProviderRef CGImageGetDataProvider(CGImageRef);
 
 // === Main code ===
+
+int test_CGGeometry() {
+  CGRect testRect;
+  testRect.origin.x = 2.0;
+  testRect.origin.y = 3.0;
+  testRect.size.width = 100.0;
+  testRect.size.height = 200.0;
+
+  if (!(CGRectGetMinX(testRect) == testRect.origin.x &&
+        CGRectGetMinX(testRect) == 2.0))
+    return -1;
+  if (!(CGRectGetMaxX(testRect) == testRect.origin.x + testRect.size.width &&
+        CGRectGetMaxX(testRect) == 102.0))
+    return -2;
+
+  if (!(CGRectGetMinY(testRect) == testRect.origin.y &&
+        CGRectGetMinY(testRect) == 3.0))
+    return -3;
+
+  if (!(CGRectGetMaxY(testRect) == testRect.origin.y + testRect.size.height &&
+        CGRectGetMaxY(testRect) == 203.0))
+    return -4;
+
+  if (!(CGRectGetHeight(testRect) == testRect.size.height))
+    return -5;
+
+  if (!(CGRectGetWidth(testRect) == testRect.size.width))
+    return -6;
+
+  return 0;
+}
 
 int int_compar(const void *a, const void *b) { return *(int *)a - *(int *)b; }
 
@@ -536,7 +332,7 @@ int test_sscanf() {
   short c, d;
   float f;
   double lf;
-  char str[4], str1[4];
+  char str[256], str1[4];
   int matched = sscanf("1.23", "%d.%d", &a, &b);
   if (!(matched == 2 && a == 1 && b == 23))
     return -1;
@@ -618,6 +414,16 @@ int test_sscanf() {
   matched = sscanf("A B", "%s %s", str, str1);
   if (!(matched == 2 && strcmp(str, "A") == 0 && strcmp(str1, "B") == 0))
     return -28;
+  matched = sscanf("numJoints 110\n", " numJoints %d", &a);
+  if (!(matched == 1 && a == 110))
+    return -29;
+  float f1, f2, f3, f4, f5, f6;
+  matched = sscanf(
+      "	\"origin\"	-1 ( 0 0 0 ) ( -0.7071067095 0 0 )		// ",
+      "%s %d ( %f %f %f ) ( %f %f %f )", str, &a, &f1, &f2, &f3, &f4, &f5, &f6);
+  if (!(matched == 8 && strcmp(str, "\"origin\"") == 0 && a == -1 && f1 == 0 &&
+        fabs(f4 + 0.7071067095) < 1e-10 && f6 == 0))
+    return -30;
   return 0;
 }
 
@@ -813,7 +619,50 @@ int test_strtoul() {
   }
   text = "   +42abc";
   if (strtoul(text, &endptr, 10) != 42UL || endptr != text + 6) {
-    return -6;
+    return -7;
+  }
+#ifndef DEFINE_ME_WHEN_BUILDING_ON_MACOS
+  // Test for overflow. "4294967296" is ULONG_MAX + 1 on a 32-bit system.
+  text = "4294967296";
+  if (strtoul(text, &endptr, 10) != 4294967295 || endptr != text + 10) {
+    return -8;
+  }
+#endif
+  text = "4294967295";
+  if (strtoul(text, &endptr, 10) != 4294967295 || endptr != text + 10) {
+    return -9;
+  }
+  text = "15";
+  if (strtoul(text, &endptr, 0) != 15UL || endptr != text + 2) {
+    return -10;
+  }
+  text = "017"; // octal: 1*8 + 7 = 15
+  if (strtoul(text, &endptr, 0) != 15UL || endptr != text + 3) {
+    return -11;
+  }
+  text = "0x0F";
+  if (strtoul(text, &endptr, 0) != 15UL || endptr != text + 4) {
+    return -12;
+  }
+  text = "";
+  if (strtoul(text, &endptr, 10) != 0UL || endptr != text) {
+    return -13;
+  }
+  text = "   ";
+  if (strtoul(text, &endptr, 10) != 0UL || endptr != text) {
+    return -14;
+  }
+  text = "1101"; // binary: 8 + 4 + 1 = 13
+  if (strtoul(text, &endptr, 2) != 13UL || endptr != text + 4) {
+    return -15;
+  }
+  text = "zZ"; // base 36: 35*36 + 35 = 1295
+  if (strtoul(text, &endptr, 36) != 1295UL || endptr != text + 2) {
+    return -16;
+  }
+  text = "77"; // octal: 7*8 + 7 = 63
+  if (strtoul(text, &endptr, 8) != 63UL || endptr != text + 2) {
+    return -17;
   }
   return 0;
 }
@@ -1016,9 +865,9 @@ int test_mtsem() {
   return 0;
 }
 
-int done = 0;
+int done = 0, done2 = 0;
 pthread_mutex_t m;
-pthread_cond_t c;
+pthread_cond_t c, c2;
 
 void thr_exit() {
   pthread_mutex_lock(&m);
@@ -1029,6 +878,15 @@ void thr_exit() {
 
 void *child(void *arg) {
   thr_exit();
+  return NULL;
+}
+
+void *child2(void *arg) {
+  pthread_mutex_lock(&m);
+  while (done == 0) {
+    pthread_cond_wait(&c2, &m);
+  }
+  pthread_mutex_unlock(&m);
   return NULL;
 }
 
@@ -1048,6 +906,21 @@ int test_cond_var() {
 
   pthread_create(&p, NULL, child, NULL);
   thr_join();
+
+  // Should wake up all threads
+  pthread_t p1, p2, p3;
+  pthread_cond_init(&c2, NULL);
+  pthread_create(&p1, NULL, child, NULL);
+  pthread_create(&p2, NULL, child, NULL);
+  pthread_create(&p3, NULL, child, NULL);
+  usleep(100);
+  pthread_mutex_lock(&m);
+  done = 1;
+  pthread_cond_broadcast(&c);
+  pthread_mutex_unlock(&m);
+  pthread_join(p1, NULL);
+  pthread_join(p2, NULL);
+  pthread_join(p3, NULL);
 
   return done == 1 ? 0 : -1;
 }
@@ -1168,6 +1041,12 @@ int test_setlocale() {
   locale = setlocale(LC_TIME, NULL);
   if (strcmp(locale, "C") != 0) {
     return 3;
+  }
+
+  // Set C locale back for numeric
+  locale = setlocale(LC_NUMERIC, "C");
+  if (strcmp(locale, "C") != 0) {
+    return 4;
   }
 
   return 0;
@@ -1311,6 +1190,252 @@ int test_ungetc() {
   if (strcmp(buf, "baa") != 0) {
     return -5;
   }
+  return 0;
+}
+
+int test_fscanf() {
+  char str[256];
+  int a;
+  float f;
+  FILE *file = fopen("test_fscanf", "r");
+  if (file == NULL) {
+    return -1;
+  }
+  int matched = fscanf(file, "%s", str);
+  if (!(matched == 1 && strcmp(str, "no_spaces_line") == 0)) {
+    return -2;
+  }
+  matched = fscanf(file, "%s %d", str, &a);
+  if (!(matched == 2 && strcmp(str, "one") == 0 && a == -100)) {
+    return -3;
+  }
+  matched = fscanf(file, "%s", str);
+  if (!(matched == 1 && strcmp(str, "string") == 0)) {
+    return -4;
+  }
+  matched = fscanf(file, "%f", &f);
+  if (!(matched == 1 && fabs(f - 3.14) < 0.001)) {
+    return -5;
+  }
+  matched = fscanf(file, "%s", str);
+  if (matched != -1) { // EOF
+    return -6;
+  }
+  fclose(file);
+  return 0;
+}
+
+// Below tests are on par with test_sscanf(),
+// but reading data from a file instead.
+// Please update those as well if you add new
+// test cases to test_sscanf()
+int test_fscanf_new() {
+  FILE *file = fopen("test_fscanf_new", "r");
+  if (!file)
+    return -1;
+
+#define SKIP_LINE(f)                                                           \
+  do {                                                                         \
+    int ch;                                                                    \
+    while ((ch = fgetc(f)) != '\n' && ch != -1)                                \
+      ;                                                                        \
+  } while (0)
+
+  int a, b, matched;
+  short c, d;
+  float f, f1, f2, f3, f4, f5, f6;
+  double lf;
+  char str[256], str1[4];
+
+  matched = fscanf(file, "%d.%d", &a, &b);
+  if (!(matched == 2 && a == 1 && b == 23))
+    return -2;
+  SKIP_LINE(file);
+
+  matched = fscanf(file, "abc%d.%d", &a, &b);
+  if (!(matched == 2 && a == 111 && b == 42))
+    return -3;
+  SKIP_LINE(file);
+
+  matched = fscanf(file, "%d.%d", &a, &b);
+  if (matched != 0)
+    return -4;
+  SKIP_LINE(file);
+
+  matched = fscanf(file, "%[^,],%d", str, &b);
+  if (!(matched == 2 && strcmp(str, "abc") == 0 && b == 8))
+    return -5;
+  SKIP_LINE(file);
+
+  matched = fscanf(file, "%hi,%i", &c, &a);
+  if (!(matched == 2 && c == 9 && a == 10))
+    return -6;
+  SKIP_LINE(file);
+
+  matched = fscanf(file, "%d", &a);
+  if (matched != 0)
+    return -7;
+  SKIP_LINE(file);
+
+  matched = fscanf(file, "%d %d", &a, &b);
+  if (!(matched == 2 && a == 10 && b == -10))
+    return -8;
+  SKIP_LINE(file);
+
+  matched = fscanf(file, "%hd %hd", &c, &d);
+  if (!(matched == 2 && c == 10 && d == -10))
+    return -9;
+  SKIP_LINE(file);
+
+  matched = fscanf(file, "%d %d", &a, &b);
+  if (!(matched == 1 && a == 3000))
+    return -10;
+  SKIP_LINE(file);
+
+  matched = fscanf(file, "%08x", &a);
+  if (!(matched == 1 && a == 16711680))
+    return -11;
+  SKIP_LINE(file);
+
+  matched = fscanf(file, "%s %f", str, &f);
+  if (!(matched == 2 && strcmp(str, "ABC") == 0 && f == 1.0f))
+    return -12;
+  SKIP_LINE(file);
+
+  matched = fscanf(file, "%s\t%f", str, &f);
+  if (!(matched == 2 && strcmp(str, "ABC") == 0 && f == 1.0f))
+    return -13;
+  SKIP_LINE(file);
+
+  matched = fscanf(file, "%s %f", str, &f);
+  if (!(matched == 2 && strcmp(str, "MAX") == 0 && f == 48.0f))
+    return -14;
+  SKIP_LINE(file);
+
+  matched = fscanf(file, "%i", &a);
+  if (!(matched == 1 && a == 9))
+    return -15;
+  SKIP_LINE(file);
+
+  matched = fscanf(file, "%i", &a);
+  if (!(matched == 1 && a == 0))
+    return -16;
+  SKIP_LINE(file);
+
+  matched = fscanf(file, "%2x%2x", &a, &b);
+  if (!(matched == 2 && a == 0xFF && b == 0x00))
+    return -17;
+  SKIP_LINE(file);
+
+  matched = fscanf(file, "%10x", &a);
+  if (!(matched == 1 && a == 0xAA))
+    return -18;
+  SKIP_LINE(file);
+
+  matched = fscanf(file, "%lf", &lf);
+  if (!(matched == 1 && lf == 3.14159265359))
+    return -19;
+  SKIP_LINE(file);
+
+  matched = fscanf(file, "%[a-z]", str);
+  if (!(matched == 1 && strcmp(str, "hello") == 0))
+    return -20;
+  SKIP_LINE(file);
+
+  matched = fscanf(file, "%[^0-9]", str);
+  if (!(matched == 1 && strcmp(str, "abc") == 0))
+    return -21;
+  SKIP_LINE(file);
+
+  matched = fscanf(file, "%[-0-9]", str);
+  if (!(matched == 1 && strcmp(str, "-123") == 0))
+    return -22;
+  SKIP_LINE(file);
+
+  matched = fscanf(file, "%[a-z-]", str);
+  if (!(matched == 1 && strcmp(str, "a-b") == 0))
+    return -23;
+  SKIP_LINE(file);
+
+  matched = fscanf(file, "%[^0-9]", str);
+  if (matched != 0)
+    return -24;
+  SKIP_LINE(file);
+
+  matched = fscanf(file, "%[A-Za-z0-9_]", str);
+  if (!(matched == 1 && strcmp(str, "Var_123") == 0))
+    return -25;
+  SKIP_LINE(file);
+
+  matched = fscanf(file, "%s", str);
+  if (!(matched == 1 && strcmp(str, "NAME") == 0))
+    return -26;
+  SKIP_LINE(file);
+
+  matched = fscanf(file, "%s", str);
+  if (!(matched == 1 && strcmp(str, "NAME") == 0))
+    return -27;
+  SKIP_LINE(file);
+
+  matched = fscanf(file, "%s %s", str, str1);
+  if (!(matched == 2 && strcmp(str, "A") == 0 && strcmp(str1, "B") == 0))
+    return -28;
+  SKIP_LINE(file);
+
+  matched = fscanf(file, " numJoints %d", &a);
+  if (!(matched == 1 && a == 110))
+    return -29;
+  SKIP_LINE(file);
+
+  matched = fscanf(file, " %s %d ( %f %f %f ) ( %f %f %f )", str, &a, &f1, &f2,
+                   &f3, &f4, &f5, &f6);
+  if (!(matched == 8 && strcmp(str, "\"origin\"") == 0 && a == -1 &&
+        f1 == 0.0f && fabs(f4 + 0.7071067095f) < 1e-10f && f6 == 0.0f))
+    return -30;
+
+  fclose(file);
+  return 0;
+}
+
+int test_CGImage_JPEG() {
+  FILE *file = fopen("test_1x1_black_pixel.jpg", "r");
+  if (file == NULL) {
+    return -1;
+  }
+  char buf[720];
+  memset(buf, '\0', 720);
+  size_t read = fread(buf, 1, 720, file);
+  fclose(file);
+  if (read != 720) {
+    return -2;
+  }
+  CFDataRef dataRef = CFDataCreate(NULL, buf, sizeof(buf));
+  if (dataRef == NULL) {
+    return -3;
+  }
+  CGDataProviderRef dataProvider = CGDataProviderCreateWithCFData(dataRef);
+  if (dataRef == NULL) {
+    return -4;
+  }
+  CGImageRef imageRef = CGImageCreateWithJPEGDataProvider(
+      dataProvider, NULL, 1 /* true */, 0 /* kCGRenderingIntentDefault */);
+  if (imageRef == NULL) {
+    return -5;
+  }
+  size_t width = CGImageGetWidth(imageRef);
+  size_t height = CGImageGetHeight(imageRef);
+  if (!(width == 1 && height == 1)) {
+    return -6;
+  }
+  CFDataRef rawData = CGDataProviderCopyData(CGImageGetDataProvider(imageRef));
+  const unsigned char *bytes = CFDataGetBytePtr(rawData);
+  // Check that pixel is indeed a RGB black one
+  if (!(bytes[0] == 0 && bytes[1] == 0 && bytes[2] == 0)) {
+    return -7;
+  }
+  CFRelease(rawData);
+  CFRelease(imageRef);
+  CFRelease(dataProvider);
   return 0;
 }
 
@@ -2199,6 +2324,28 @@ int test_lrint() {
   return 0;
 }
 
+int test_fesetround() {
+  int default_rounding = fegetround();
+  if (default_rounding != FE_TONEAREST) {
+    return -1;
+  }
+  if (lrint(+11.5) != +12.0 || lrint(+12.5) != +12.0 || lrint(-11.5) != -12.0) {
+    return -2;
+  }
+  int res = fesetround(FE_TOWARDZERO);
+  if (res != 0) {
+    return -3;
+  }
+  if (lrint(+11.5) != +11.0 || lrint(+12.5) != +12.0 || lrint(-11.5) != -11.0) {
+    return -4;
+  }
+  res = fesetround(default_rounding);
+  if (res != 0) {
+    return -5;
+  }
+  return 0;
+}
+
 int test_ldexp() {
   struct {
     double x;
@@ -2458,9 +2605,9 @@ int test_inet_pton() {
 int test_case_CFURL(const char *basePathCStr, const char *urlPathCStr,
                     const char *fileNameCStr,
                     const char *expectedAppendedCStr) {
-  CFURLRef url = CFURLCreateFromFileSystemRepresentation(NULL, urlPathCStr,
-                                                         strlen(urlPathCStr),
-                                                         1 // isDirectory
+  CFURLRef url = CFURLCreateFromFileSystemRepresentation(
+      NULL, (uint8_t *)urlPathCStr, strlen(urlPathCStr),
+      1 // isDirectory
   );
   if (url == NULL) {
     return -1;
@@ -2551,6 +2698,406 @@ int test_CFURL() {
   return 0;
 }
 
+int test_CFNumberCompare_simple() {
+  float a = 3.333;
+  CFNumberRef aa = CFNumberCreate(NULL, 5, &a); // kCFNumberFloat32Type
+  double b = 3.333;
+  CFNumberRef bb = CFNumberCreate(NULL, 6, &b); // kCFNumberFloat64Type
+  CFComparisonResult res = CFNumberCompare(aa, bb, NULL);
+  // `3.333` looses precision as float, thus 2 numbers are not equal
+  if (res != kCFCompareLessThan) {
+    return -1;
+  }
+  res = CFNumberCompare(bb, aa, NULL);
+  if (res != kCFCompareGreaterThan) {
+    return -2;
+  }
+  int c = -1;
+  CFNumberRef cc = CFNumberCreate(NULL, 3, &c); // kCFNumberSInt32Type
+  long long d = -1;
+  CFNumberRef dd = CFNumberCreate(NULL, 4, &d); // kCFNumberSInt64Type
+  res = CFNumberCompare(cc, dd, NULL);
+  if (res != kCFCompareEqualTo) {
+    return -3;
+  }
+  char e = 0;
+  CFNumberRef ee = CFNumberCreate(NULL, 1, &e); // kCFNumberSInt8Type
+  double f = 0.0;
+  CFNumberRef ff = CFNumberCreate(NULL, 6, &f); // kCFNumberFloat64Type
+  res = CFNumberCompare(ee, ff, NULL);
+  if (res != kCFCompareEqualTo) {
+    return -4;
+  }
+  return 0;
+}
+
+#ifndef kCFNumberSInt8Type
+#define kCFNumberSInt8Type 1
+#define kCFNumberSInt16Type 2
+#define kCFNumberSInt32Type 3
+#define kCFNumberSInt64Type 4
+#define kCFNumberFloat32Type 5
+#define kCFNumberFloat64Type 6
+#endif
+
+static int cmp(CFNumberRef a, CFNumberRef b, CFComparisonResult expected,
+               const char *label, int failCode) {
+  CFComparisonResult r = CFNumberCompare(a, b, NULL);
+  if (r != expected) {
+    const char *expStr = expected == kCFCompareLessThan      ? "<"
+                         : expected == kCFCompareGreaterThan ? ">"
+                                                             : "==";
+    const char *gotStr = r == kCFCompareLessThan      ? "<"
+                         : r == kCFCompareGreaterThan ? ">"
+                                                      : "==";
+    printf("FAIL (%d): %s : expected %s, got %s\n", failCode, label, expStr,
+           gotStr);
+    return failCode;
+  }
+  return 0;
+}
+
+#define MAKE_NUM(var, typeEnum) CFNumberCreate(NULL, typeEnum, &(var))
+#define TEST_CMP(aRef, bRef, expected, label, code)                            \
+  {                                                                            \
+    int _e = cmp(aRef, bRef, expected, label, code);                           \
+    if (_e) {                                                                  \
+      CFRelease(aRef);                                                         \
+      CFRelease(bRef);                                                         \
+      return _e;                                                               \
+    }                                                                          \
+    CFRelease(aRef);                                                           \
+    CFRelease(bRef);                                                           \
+  }
+
+static int compare_integral_examples(void) {
+  /* Cross-width equalities */
+  {
+    int32_t v32 = -1;
+    int64_t v64 = -1;
+    CFNumberRef n32 = MAKE_NUM(v32, kCFNumberSInt32Type);
+    CFNumberRef n64 = MAKE_NUM(v64, kCFNumberSInt64Type);
+    TEST_CMP(n32, n64, kCFCompareEqualTo, "SInt32 -1 == SInt64 -1", -10);
+  }
+  {
+    int8_t z8 = 0;
+    double zD = 0.0;
+    CFNumberRef n8 = MAKE_NUM(z8, kCFNumberSInt8Type);
+    CFNumberRef nD = MAKE_NUM(zD, kCFNumberFloat64Type);
+    TEST_CMP(n8, nD, kCFCompareEqualTo, "SInt8 0 == Float64 0.0", -11);
+  }
+
+  /* Min / Max ordering across widths */
+  {
+    int64_t min64 = INT64_MIN;
+    int32_t min32 = INT32_MIN;
+    CFNumberRef n64 = MAKE_NUM(min64, kCFNumberSInt64Type);
+    CFNumberRef n32 = MAKE_NUM(min32, kCFNumberSInt32Type);
+    TEST_CMP(n64, n32, kCFCompareLessThan, "INT64_MIN < INT32_MIN", -12);
+  }
+  {
+    int64_t max64 = INT64_MAX;
+    int32_t max32 = INT32_MAX;
+    CFNumberRef n64 = MAKE_NUM(max64, kCFNumberSInt64Type);
+    CFNumberRef n32 = MAKE_NUM(max32, kCFNumberSInt32Type);
+    TEST_CMP(n64, n32, kCFCompareGreaterThan, "INT64_MAX > INT32_MAX", -13);
+  }
+  {
+    int16_t min16 = INT16_MIN; /* -32768 */
+    int8_t min8 = INT8_MIN;    /* -128   */
+    CFNumberRef n16 = MAKE_NUM(min16, kCFNumberSInt16Type);
+    CFNumberRef n8 = MAKE_NUM(min8, kCFNumberSInt8Type);
+    TEST_CMP(n16, n8, kCFCompareLessThan, "INT16_MIN < INT8_MIN", -14);
+  }
+  {
+    int16_t max16 = INT16_MAX;
+    int8_t max8 = INT8_MAX;
+    CFNumberRef n16 = MAKE_NUM(max16, kCFNumberSInt16Type);
+    CFNumberRef n8 = MAKE_NUM(max8, kCFNumberSInt8Type);
+    TEST_CMP(n16, n8, kCFCompareGreaterThan, "INT16_MAX > INT8_MAX", -15);
+  }
+
+  /* Extremes vs -1 */
+  {
+    int64_t min64 = INT64_MIN;
+    int64_t neg1 = -1;
+    CFNumberRef nMin = MAKE_NUM(min64, kCFNumberSInt64Type);
+    CFNumberRef nNeg1 = MAKE_NUM(neg1, kCFNumberSInt64Type);
+    TEST_CMP(nMin, nNeg1, kCFCompareLessThan, "INT64_MIN < -1", -16);
+  }
+
+  return 0;
+}
+
+static int compare_precision_examples(void) {
+  /* Original float vs double 3.333 */
+  {
+    float f = 3.333f;
+    double d = 3.333;
+    CFNumberRef nf = MAKE_NUM(f, kCFNumberFloat32Type);
+    CFNumberRef nd = MAKE_NUM(d, kCFNumberFloat64Type);
+    /* float loses precision => float < double (expected) */
+    TEST_CMP(nf, nd, kCFCompareLessThan, "float 3.333f < double 3.333", -20);
+    /* Reverse */
+    float f2 = 3.333f;
+    double d2 = 3.333;
+    CFNumberRef nf2 = MAKE_NUM(f2, kCFNumberFloat32Type);
+    CFNumberRef nd2 = MAKE_NUM(d2, kCFNumberFloat64Type);
+    TEST_CMP(nd2, nf2, kCFCompareGreaterThan, "double 3.333 > float 3.333f",
+             -21);
+  }
+
+  /* 0.1f vs 0.1 (0.1f rounds *up* relative to double literal 0.1) */
+  {
+    float f = 0.1f;
+    double d = 0.1; /* double literal */
+    CFNumberRef nf = MAKE_NUM(f, kCFNumberFloat32Type);
+    CFNumberRef nd = MAKE_NUM(d, kCFNumberFloat64Type);
+    /* 0.1f (promoted) is slightly greater than 0.1 double */
+    TEST_CMP(nf, nd, kCFCompareGreaterThan, "0.1f > 0.1 (double)", -22);
+  }
+
+  /* INT64_MAX vs its double representation (double rounds) */
+  {
+    int64_t i = INT64_MAX;        /*  9223372036854775807 */
+    double d = (double)INT64_MAX; /* Rounds to 9223372036854775808 */
+    CFNumberRef ni = MAKE_NUM(i, kCFNumberSInt64Type);
+    CFNumberRef nd = MAKE_NUM(d, kCFNumberFloat64Type);
+    TEST_CMP(ni, nd, kCFCompareLessThan,
+             "INT64_MAX (exact) < double(INT64_MAX) (rounded up)", -23);
+  }
+
+  return 0;
+}
+
+static int compare_special_float_values(void) {
+  /* Positive vs negative zero */
+  {
+    double pz = 0.0;
+    double nz = -0.0;
+    CFNumberRef nP = MAKE_NUM(pz, kCFNumberFloat64Type);
+    CFNumberRef nN = MAKE_NUM(nz, kCFNumberFloat64Type);
+    TEST_CMP(nP, nN, kCFCompareEqualTo, "+0.0 == -0.0", -24);
+  }
+
+  /* Infinities */
+  {
+    double inf = INFINITY;
+    double ninf = -INFINITY;
+    double zero = 0.0;
+
+    CFNumberRef nInf = MAKE_NUM(inf, kCFNumberFloat64Type);
+    CFNumberRef nZero = MAKE_NUM(zero, kCFNumberFloat64Type);
+    TEST_CMP(nInf, nZero, kCFCompareGreaterThan, "Inf  > 0", -25);
+
+    nZero = MAKE_NUM(zero, kCFNumberFloat64Type);
+    CFNumberRef nNInf = MAKE_NUM(ninf, kCFNumberFloat64Type);
+    TEST_CMP(nNInf, nZero, kCFCompareLessThan, "-Inf < 0", -26);
+
+    nInf = MAKE_NUM(inf, kCFNumberFloat64Type);
+    nNInf = MAKE_NUM(ninf, kCFNumberFloat64Type);
+    TEST_CMP(nInf, nNInf, kCFCompareGreaterThan, "Inf  > -Inf", -27);
+  }
+
+  return 0;
+}
+
+static int compare_unsigned_limit_examples(void) {
+  /* UINT64_MAX cannot be stored exactly as a signed 64-bit CFNumber.
+     We *demonstrate* by comparing a double approximation vs INT64_MAX. */
+  {
+    double u64d = (double)UINT64_MAX; /* ~1.844674407e19 (loses low bits) */
+    int64_t i64max = INT64_MAX;       /*  9.223372036854775807e18 */
+    CFNumberRef nUApprox = MAKE_NUM(u64d, kCFNumberFloat64Type);
+    CFNumberRef nI64Max = MAKE_NUM(i64max, kCFNumberSInt64Type);
+    TEST_CMP(nUApprox, nI64Max, kCFCompareGreaterThan,
+             "double(UINT64_MAX) > INT64_MAX", -28);
+  }
+
+  /* Similar for smaller widths: compare UINT32_MAX via double vs INT32_MAX
+   * (exact vs rounding) */
+  {
+    double u32d = (double)UINT32_MAX; /* 4294967295 exactly representable */
+    int32_t s32max = INT32_MAX;       /* 2147483647 */
+    CFNumberRef nU = MAKE_NUM(u32d, kCFNumberFloat64Type);
+    CFNumberRef nS = MAKE_NUM(s32max, kCFNumberSInt32Type);
+    TEST_CMP(nU, nS, kCFCompareGreaterThan, "double(UINT32_MAX) > INT32_MAX",
+             -29);
+  }
+
+  /* UINT8_MAX vs INT8_MAX using a wider signed container (int16) for 255 */
+  {
+    int16_t u8max_as16 = 255; /* representable */
+    int8_t s8max = INT8_MAX;  /* 127 */
+    CFNumberRef nU = MAKE_NUM(u8max_as16, kCFNumberSInt16Type);
+    CFNumberRef nS = MAKE_NUM(s8max, kCFNumberSInt8Type);
+    TEST_CMP(nU, nS, kCFCompareGreaterThan, "255 (as SInt16) > INT8_MAX", -30);
+  }
+
+  return 0;
+}
+
+int test_CFNumberCompare_extended(void) {
+  int r;
+
+  r = compare_integral_examples();
+  if (r)
+    return r;
+  r = compare_precision_examples();
+  if (r)
+    return r;
+  r = compare_special_float_values();
+  if (r)
+    return r;
+  r = compare_unsigned_limit_examples();
+  if (r)
+    return r;
+
+  return 0;
+}
+
+int test_memset_pattern() {
+  char buf[64];
+  // memset_pattern4
+  memset_pattern4(buf, "1234", sizeof(buf));
+  if (strncmp(buf, "1234123412", 10) != 0) {
+    return -1;
+  }
+  memset(buf, 0, sizeof(buf));
+  memset_pattern4(buf, "abcd", 8);
+  if (memcmp(buf, "abcdabcd", 8) != 0) {
+    return -2;
+  }
+  memset(buf, 0, sizeof(buf));
+  memset_pattern4(buf, "XYZW", 3);
+  if (memcmp(buf, "XYZ", 3) != 0) {
+    return -3;
+  }
+  char original_buf[sizeof(buf)];
+  memset(buf, 0xAA, sizeof(buf)); // Fill buffer with a known value
+  memcpy(original_buf, buf, sizeof(buf));
+  memset_pattern4(buf, "1234", 0);
+  if (memcmp(buf, original_buf, sizeof(buf)) != 0) {
+    return -4;
+  }
+  memset(buf, 0, sizeof(buf));
+  char pattern4_null[] = {'A', '\0', 'B', 'C'};
+  char expected4_null[] = {'A', '\0', 'B', 'C', 'A', '\0', 'B'};
+  memset_pattern4(buf, pattern4_null, 7);
+  if (memcmp(buf, expected4_null, 7) != 0) {
+    return -5;
+  }
+  // memset_pattern8
+  unsigned long long pattern8 = 0x0102030405060708;
+  char expected8_full[] = "\x08\x07\x06\x05\x04\x03\x02\x01";
+  memset(buf, 0, sizeof(buf));
+  memset_pattern8(buf, &pattern8, 10);
+  if (memcmp(buf, expected8_full, 8) != 0 ||
+      memcmp(buf + 8, expected8_full, 2) != 0) {
+    return -6;
+  }
+  memset(buf, 0, sizeof(buf));
+  memset_pattern8(buf, &pattern8, 16);
+  if (memcmp(buf, expected8_full, 8) != 0 ||
+      memcmp(buf + 8, expected8_full, 8) != 0) {
+    return -7;
+  }
+  memset(buf, 0, sizeof(buf));
+  memset_pattern8(buf, &pattern8, 5);
+  if (memcmp(buf, expected8_full, 5) != 0) {
+    return -8;
+  }
+  // memset_pattern16
+  const char *pattern16 = "0123456789ABCDEF";
+  memset(buf, 0, sizeof(buf));
+  memset_pattern16(buf, pattern16, 20);
+  char expected16_trunc[] = "0123456789ABCDEF0123";
+  if (memcmp(buf, expected16_trunc, 20) != 0) {
+    return -9;
+  }
+  memset(buf, 0, sizeof(buf));
+  memset_pattern16(buf, pattern16, 32);
+  char expected16_exact[] = "0123456789ABCDEF0123456789ABCDEF";
+  if (memcmp(buf, expected16_exact, 32) != 0) {
+    return -10;
+  }
+  return 0;
+}
+typedef struct {
+  SyncTester *tester;
+  BOOL res;
+} sync_test_arg;
+
+void *modify(sync_test_arg *arg) {
+  SyncTester *tester = arg->tester;
+  arg->res = [tester holdAndCheckCounter];
+  return NULL;
+}
+void *try_modify(SyncTester *tester) {
+  [tester tryModifyCounter];
+  return NULL;
+}
+
+int test_synchronized() {
+  SyncTester *sync_test = [SyncTester new];
+  sync_test_arg *arg = malloc(sizeof(sync_test_arg));
+  memset(arg, 0, sizeof(sync_test_arg));
+  arg->tester = sync_test;
+  pthread_t locking_thread;
+  pthread_create(&locking_thread, NULL, (void *(*)(void *)) & modify, arg);
+  pthread_t blocked_threads[10];
+  for (int i = 0; i < 10; i++) {
+    pthread_create(blocked_threads + i, NULL, (void *(*)(void *)) & try_modify,
+                   sync_test);
+  }
+  if (pthread_join(locking_thread, NULL))
+    return -1;
+  if (!arg->res)
+    return -1;
+  [sync_test recursiveSyncEnter];
+  if (!sync_test.test_ok)
+    return -1;
+  return 0;
+}
+
+bool test_case_CFURLHasDirectoryPath(const char *str) {
+  CFURLRef url = CFURLCreateWithBytes(NULL, str, strlen(str),
+                                      kCFStringEncodingASCII, NULL);
+  Boolean res = CFURLHasDirectoryPath(url);
+  CFRelease(url);
+  return res;
+}
+
+int test_CFURLHasDirectoryPath() {
+  if (test_case_CFURLHasDirectoryPath("/a/b"))
+    return -1;
+  if (!test_case_CFURLHasDirectoryPath("/a/b/"))
+    return -2;
+  if (!test_case_CFURLHasDirectoryPath("/"))
+    return -3;
+  if (test_case_CFURLHasDirectoryPath("//"))
+    return -4;
+  if (test_case_CFURLHasDirectoryPath("//a"))
+    return -5;
+  if (!test_case_CFURLHasDirectoryPath("//a/"))
+    return -6;
+  if (!test_case_CFURLHasDirectoryPath("///"))
+    return -7;
+  if (!test_case_CFURLHasDirectoryPath("////"))
+    return -8;
+  if (!test_case_CFURLHasDirectoryPath("."))
+    return -9;
+  if (!test_case_CFURLHasDirectoryPath(".."))
+    return -10;
+  if (test_case_CFURLHasDirectoryPath("..."))
+    return -11;
+  if (!test_case_CFURLHasDirectoryPath("/.."))
+    return -12;
+  if (test_case_CFURLHasDirectoryPath(""))
+    return -13;
+  return 0;
+}
+
 // clang-format off
 #define FUNC_DEF(func)                                                         \
   { &func, #func }
@@ -2582,6 +3129,8 @@ struct {
     FUNC_DEF(test_swprintf),
     FUNC_DEF(test_realpath),
     FUNC_DEF(test_ungetc),
+    FUNC_DEF(test_fscanf),
+    FUNC_DEF(test_fscanf_new),
     FUNC_DEF(test_CFStringFind),
     FUNC_DEF(test_strcspn),
     FUNC_DEF(test_mbstowcs),
@@ -2594,6 +3143,7 @@ struct {
     FUNC_DEF(test_CFMutableDictionary_CustomCallbacks_PrimitiveTypes),
     FUNC_DEF(test_CFMutableDictionary_CustomCallbacks_CFTypes),
     FUNC_DEF(test_lrint),
+    FUNC_DEF(test_fesetround),
     FUNC_DEF(test_ldexp),
     FUNC_DEF(test_maskrune),
     FUNC_DEF(test_frexpf),
@@ -2603,14 +3153,16 @@ struct {
     FUNC_DEF(test_inet_ntop),
     FUNC_DEF(test_inet_pton),
     FUNC_DEF(test_CFURL),
+    FUNC_DEF(test_CFNumberCompare_simple),
+    FUNC_DEF(test_CFNumberCompare_extended),
+    FUNC_DEF(test_memset_pattern),
+    FUNC_DEF(test_CGGeometry),
+    FUNC_DEF(test_CFURLHasDirectoryPath),
+    FUNC_DEF(test_CGImage_JPEG),
+    FUNC_DEF(test_synchronized)
 };
 // clang-format on
 
-// Because no libc is linked into this executable, there is no libc entry point
-// to call main. Instead, integration.rs tells Clang to set the _main symbol
-// as the entry point. (It has to be _main because a C compiler will throw
-// away stuff not called by main().) Since this is the true entry point, there's
-// no argc or argv and we must call exit() ourselves.
 int main() {
   int tests_run = 0;
   int tests_passed = 0;

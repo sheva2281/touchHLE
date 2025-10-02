@@ -17,7 +17,7 @@ use crate::frameworks::core_graphics::cg_context::{
 use crate::frameworks::core_graphics::cg_image::{
     kCGImageAlphaPremultipliedLast, kCGImageByteOrder32Big,
 };
-use crate::frameworks::core_graphics::{CGPoint, CGRect, CGSize};
+use crate::frameworks::core_graphics::{CGFloat, CGPoint, CGRect, CGSize};
 use crate::frameworks::foundation::ns_string;
 use crate::mem::{GuestUSize, Ptr};
 use crate::objc::{id, msg, nil, objc_classes, release, retain, ClassExports, HostObject, ObjC};
@@ -37,6 +37,7 @@ pub(super) struct CALayerHostObject {
     pub(super) opaque: bool,
     pub(super) opacity: f32,
     pub(super) background_color: CGColorRef,
+    pub(super) corner_radius: CGFloat,
     pub(super) needs_display: bool,
     /// `CGImageRef*`
     pub(super) contents: id,
@@ -90,7 +91,8 @@ pub const CLASSES: ClassExports = objc_classes! {
         opaque: false,
         opacity: 1.0,
         background_color: nil, // transparency
-        needs_display: true,
+        corner_radius: 0.0,
+        needs_display: false,
         contents: nil,
         drawable_properties: nil,
         presented_pixels: None,
@@ -162,6 +164,15 @@ pub const CLASSES: ClassExports = objc_classes! {
         env.objc.borrow_mut::<CALayerHostObject>(layer).superlayer = this;
         env.objc.borrow_mut::<CALayerHostObject>(this).sublayers.push(layer);
     }
+}
+
+- (())insertSublayer:(id)layer atIndex:(u32)idx {
+    retain(env, layer);
+    () = msg![env; layer removeFromSuperlayer];
+    env.objc.borrow_mut::<CALayerHostObject>(layer).superlayer = this;
+
+    let CALayerHostObject { ref mut sublayers, .. } = env.objc.borrow_mut(this);
+    sublayers.insert(idx.try_into().unwrap(), layer);
 }
 
 - (())insertSublayer:(id)layer below:(id)sibling {
@@ -270,6 +281,13 @@ pub const CLASSES: ClassExports = objc_classes! {
     CGColorRelease(env, old_color);
 }
 
+- (CGFloat)cornerRadius {
+    env.objc.borrow::<CALayerHostObject>(this).corner_radius
+}
+- (())setCornerRadius:(CGFloat)corner_radius {
+    env.objc.borrow_mut::<CALayerHostObject>(this).corner_radius = corner_radius;
+}
+
 - (bool)needsDisplay {
     env.objc.borrow::<CALayerHostObject>(this).needs_display
 }
@@ -302,34 +320,6 @@ pub const CLASSES: ClassExports = objc_classes! {
         return;
     }
 
-    // UIView has a method called drawRect: that subclasses override if they
-    // need custom drawing. touchHLE's UIView (a CALayerDelegate) provides
-    // an implementation of drawLayer:inContext: that calls drawRect:.
-    // This maintains a clean separation of UIView and CALayer, but it also
-    // means that CALayer has no idea which views actually need custom drawing,
-    // because they all have the inherited drawLayer:inContext: method.
-    // To avoid wasting space and time on unnecessary bitmaps, let's pierce the
-    // veil.
-    // (TODO: somehow do this optimization in UIView rather than CALayer.
-    // Apparently Apple do it that way: https://stackoverflow.com/q/4979192)
-    let ui_view_class = env.objc.get_known_class("UIView", &mut env.mem);
-    if env.objc.class_is_subclass_of(delegate_class, ui_view_class) {
-        let draw_rect_sel = env.objc.lookup_selector("drawRect:").unwrap();
-        let draw_layer_sel = env.objc.lookup_selector("drawLayer:inContext:").unwrap();
-        if !env.objc.class_overrides_method_of_superclass(
-            delegate_class,
-            draw_rect_sel,
-            ui_view_class
-        ) && !env.objc.class_overrides_method_of_superclass(
-            delegate_class,
-            draw_layer_sel,
-            ui_view_class
-        ) {
-            log_dbg!("Skipped render! {:?} does not override UIView's drawRect: or drawLayer:inContext: methods.", delegate_class);
-            return;
-        }
-    }
-
     let &mut CALayerHostObject {
         cg_context,
         ref mut gles_texture_is_up_to_date,
@@ -343,10 +333,9 @@ pub const CLASSES: ClassExports = objc_classes! {
     let int_width = size.width.round() as GuestUSize;
     let int_height = size.height.round() as GuestUSize;
 
-    let need_new_context = cg_context.is_none_or(|existing| (
+    let need_new_context = cg_context.is_none_or(|existing|
             CGBitmapContextGetWidth(env, existing) != int_width ||
             CGBitmapContextGetHeight(env, existing) != int_height
-        )
     );
     let cg_context = if need_new_context {
         if let Some(old_context) = cg_context {

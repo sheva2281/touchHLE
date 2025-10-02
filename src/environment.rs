@@ -10,7 +10,7 @@
 
 mod mutex;
 
-use crate::abi::{CallFromHost, GuestRet};
+use crate::abi::{CallFromHost, GuestFunction, GuestRet};
 use crate::libc::semaphore::sem_t;
 use crate::mem::{GuestUSize, MutPtr, MutVoidPtr};
 use crate::{
@@ -74,6 +74,16 @@ impl Thread {
     }
 }
 
+impl std::fmt::Debug for Thread {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Thread {{ active: {:?}, blocked_by: {:?}, return_value: {:?} }}",
+            self.active, self.blocked_by, self.return_value
+        )
+    }
+}
+
 /// The struct containing the entire emulator state. Methods are provided for
 /// execution and management of threads.
 pub struct Environment {
@@ -101,6 +111,7 @@ pub struct Environment {
     /// Set to [true] when created using [Environment::new_without_app].
     /// In practice, this means we are in the app picker.
     pub is_fake: bool,
+    pub dump_file: Option<std::fs::File>,
 }
 
 /// What to do next when executing this thread.
@@ -384,7 +395,13 @@ impl Environment {
             gdb_server: None,
             env_vars: Default::default(),
             is_fake: false,
+            dump_file: None,
         };
+
+        if env.options.dumping_options.any() {
+            env.dump_file =
+                Some(std::fs::File::create(&env.options.dumping_file).map_err(|e| e.to_string())?);
+        }
 
         env.set_up_initial_env_vars();
 
@@ -461,6 +478,15 @@ impl Environment {
                 () = func.call_from_host(&mut env, ());
             }
             log_dbg!("Static initialization done");
+        }
+
+        if env.options.dumping_options.linking_info {
+            let file = env.dump_file.as_mut().unwrap();
+            env.objc.dump_classes(file).unwrap();
+            env.dyld.dump_lazy_symbols(&env.bins, file).unwrap();
+            env.objc
+                .dump_selectors(&env.bins[0], &env.mem, file)
+                .unwrap();
         }
 
         env.cpu.branch(entry_point_addr);
@@ -545,6 +571,7 @@ impl Environment {
             gdb_server: None,
             env_vars: Default::default(),
             is_fake: true,
+            dump_file: None,
         };
 
         env.set_up_initial_env_vars();
@@ -660,7 +687,7 @@ impl Environment {
     ) -> ThreadId {
         let stack_alloc = self.mem.alloc(stack_size);
         let stack_high_addr = stack_alloc.to_bits() + stack_size;
-        assert!(stack_high_addr % 4 == 0);
+        assert!(stack_high_addr.is_multiple_of(4));
 
         self.threads.push(Thread {
             active: true,
@@ -993,7 +1020,9 @@ impl Environment {
                             ThreadNextAction::Yield
                         }
                     }
-                    dyld::Dyld::SVC_LAZY_LINK | dyld::Dyld::SVC_LINKED_FUNCTIONS_BASE.. => {
+                    dyld::Dyld::SVC_LAZY_LINK
+                    | dyld::Dyld::SVC_LAZY_LINK_RET_FLAG
+                    | dyld::Dyld::SVC_LINKED_FUNCTIONS_BASE.. => {
                         if let Some(f) = self.dyld.get_svc_handler(
                             &self.bins,
                             &mut self.mem,
@@ -1007,6 +1036,15 @@ impl Environment {
                             f.call_from_guest(self);
                             self.threads[self.current_thread].in_host_function =
                                 was_in_host_function;
+
+                            // On entry_size 4 return here since there's
+                            // no space to add a ret after the svc call
+                            if svc & dyld::Dyld::SVC_LAZY_LINK_RET_FLAG != 0 {
+                                self.cpu.branch(GuestFunction::from_addr_with_thumb_bit(
+                                    self.cpu.regs()[cpu::Cpu::LR],
+                                ));
+                            }
+
                             // Host function might have put the thread to sleep.
                             if let ThreadBlock::NotBlocked =
                                 self.threads[self.current_thread].blocked_by
@@ -1148,20 +1186,20 @@ impl Environment {
                                 .pthread
                                 .cond
                                 .condition_variables
-                                .get(&cond)
+                                .get_mut(&cond)
                                 .unwrap();
-                            if host_cond.done {
-                                log_dbg!(
-                                    "Thread {} is unblocking on cond var {:?}.",
-                                    self.current_thread,
-                                    cond
-                                );
+                            let mutex = host_cond.curr_mutex.unwrap();
+                            if host_cond
+                                .waking
+                                .front()
+                                .is_some_and(|waking_thread| *waking_thread == i)
+                                && !self.mutex_state.mutex_is_locked(mutex)
+                            {
+                                log_dbg!("Thread {} is unblocking on cond var {:?}.", i, cond);
+                                host_cond.waking.pop_front();
                                 self.threads[i].blocked_by = ThreadBlock::NotBlocked;
                                 suitable_thread = Some(i);
-                                let used_mutex =
-                                    self.libc_state.pthread.cond.mutexes.remove(&cond).unwrap();
-                                mutex_to_relock = Some(used_mutex.mutex_id);
-                                break;
+                                mutex_to_relock = Some(mutex);
                             }
                         }
                         ThreadBlock::Joining(joinee_thread, ptr) => {

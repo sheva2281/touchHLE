@@ -28,6 +28,8 @@
 #[macro_use]
 mod log;
 mod abi;
+#[cfg(target_os = "android")]
+mod android_bridge;
 mod app_picker;
 mod audio;
 mod bundle;
@@ -89,7 +91,13 @@ pub extern "C" fn SDL_main(
     }));
 
     // Empty args: brings up app picker.
-    match main([String::new()].into_iter()) {
+    #[cfg(target_os = "android")]
+    let args_vec =
+        crate::android_bridge::take_pending_launch_args().unwrap_or_else(|| vec![String::new()]);
+    #[cfg(not(target_os = "android"))]
+    let args_vec = vec![String::new()];
+
+    match main(args_vec.into_iter()) {
         Ok(_) => echo!("touchHLE finished"),
         Err(e) => echo!("touchHLE errored: {e:?}"),
     }
@@ -144,6 +152,8 @@ pub fn main<T: Iterator<Item = String>>(mut args: T) -> Result<(), String> {
     let mut just_info = false;
     let mut option_args = Vec::new();
 
+    let mut options = options::Options::default();
+
     for arg in args {
         if arg == "--help" {
             echo!("{}", USAGE);
@@ -154,10 +164,10 @@ pub fn main<T: Iterator<Item = String>>(mut args: T) -> Result<(), String> {
             return Ok(());
         } else if arg == "--info" {
             just_info = true;
-        // Parse an option but discard the value, to test whether it's valid.
-        // We don't want to apply it immediately, because then options loaded
-        // from a file would take precedence over options from the command line.
-        } else if options::Options::default().parse_argument(&arg)? {
+        // Parse an option and store a backup in option_args so that we can
+        // reapply them after file options are loaded. This ensures that
+        // command line options take precedence over file options.
+        } else if options.parse_argument(&arg)? {
             option_args.push(arg);
         } else if bundle_path.is_none() {
             bundle_path = Some(PathBuf::from(arg));
@@ -166,6 +176,13 @@ pub fn main<T: Iterator<Item = String>>(mut args: T) -> Result<(), String> {
             echo!("{}", options::OPTIONS_HELP);
             return Err(format!("Unexpected argument: {arg:?}"));
         }
+    }
+
+    if options.dumping_options.symbols {
+        let mut file = std::fs::File::create(&options.dumping_file).map_err(|e| e.to_string())?;
+        dyld::Dyld::dump_dyld_host_symbols(&mut file).unwrap();
+        objc::ObjC::dump_host_class_symbols(&mut file).unwrap();
+        return Ok(());
     }
 
     let (bundle_path, env_for_salvage) = if let Some(bundle_path) = bundle_path {
@@ -242,8 +259,6 @@ pub fn main<T: Iterator<Item = String>>(mut args: T) -> Result<(), String> {
     if just_info {
         return Ok(());
     }
-
-    let mut options = options::Options::default();
 
     // Apply options from files
     fn apply_options<F: std::io::Read, P: std::fmt::Display>(

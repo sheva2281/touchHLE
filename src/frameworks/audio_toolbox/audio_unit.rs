@@ -24,7 +24,7 @@ use crate::frameworks::audio_toolbox::audio_components;
 use crate::frameworks::audio_toolbox::audio_queue::{
     is_supported_audio_format, log_if_broken_audio_format,
 };
-use crate::frameworks::carbon_core::OSStatus;
+use crate::frameworks::carbon_core::{paramErr, OSStatus};
 use crate::frameworks::core_audio_types::AudioStreamBasicDescription;
 use crate::frameworks::core_foundation::cf_run_loop::CFRunLoopGetMain;
 use crate::frameworks::foundation::ns_run_loop;
@@ -60,6 +60,7 @@ const kAudioUnitScope_Global: AudioUnitScope = 0;
 const kAudioUnitScope_Input: AudioUnitScope = 1;
 const kAudioUnitScope_Output: AudioUnitScope = 2;
 
+const kAudioUnitProperty_SampleRate: AudioUnitPropertyID = 2;
 const kAudioUnitProperty_SetRenderCallback: AudioUnitPropertyID = 23;
 const kAudioUnitProperty_MaximumFramesPerSlice: AudioUnitPropertyID = 14;
 const kAudioUnitProperty_StreamFormat: AudioUnitPropertyID = 8;
@@ -74,8 +75,10 @@ fn AudioUnitInitialize(env: &mut Environment, in_unit: AudioUnit) -> OSStatus {
 
 fn AudioUnitUninitialize(env: &mut Environment, in_unit: AudioUnit) -> OSStatus {
     let run_loop = CFRunLoopGetMain(env);
-    ns_run_loop::remove_audio_unit(env, run_loop, in_unit);
-    0 // success
+    match ns_run_loop::remove_audio_unit(env, run_loop, in_unit) {
+        Ok(_) => 0,
+        Err(_) => paramErr, // TODO: handle different errors
+    }
 }
 
 fn AudioUnitSetProperty(
@@ -172,7 +175,28 @@ fn AudioUnitGetProperty(
                 guest_size_of::<AudioStreamBasicDescription>(),
             );
         }
-        _ => unimplemented!(),
+        kAudioUnitProperty_SampleRate => {
+            assert_eq!(env.mem.read(io_data_size), guest_size_of::<f64>());
+            let sample_rate = match in_scope {
+                kAudioUnitScope_Global => host_object.global_stream_format.sample_rate,
+                kAudioUnitScope_Output => {
+                    host_object
+                        .output_stream_format
+                        .unwrap_or(host_object.global_stream_format)
+                        .sample_rate
+                }
+                kAudioUnitScope_Input => {
+                    host_object
+                        .input_stream_format
+                        .unwrap_or(host_object.global_stream_format)
+                        .sample_rate
+                }
+                _ => unimplemented!(),
+            };
+            env.mem.write(out_data.cast(), sample_rate);
+            env.mem.write(io_data_size.cast(), guest_size_of::<f64>());
+        }
+        _ => unimplemented!("in_id {}", in_id),
     };
     0 // success
 }
@@ -245,12 +269,18 @@ pub fn render_audio_unit(env: &mut Environment, audio_unit: AudioUnit) {
     let audio_components_state = audio_components::State::get(&mut env.framework_state);
     let audio_unit_host_object = audio_components_state
         .audio_component_instances
-        .get(&audio_unit)
+        .get_mut(&audio_unit)
         .unwrap();
 
     if !audio_unit_host_object.started {
         return;
     }
+
+    if audio_unit_host_object.is_running_handler {
+        return;
+    }
+
+    audio_unit_host_object.is_running_handler = true;
 
     let input_stream_format = audio_unit_host_object.input_stream_format;
     let output_stream_format = audio_unit_host_object.output_stream_format;
@@ -418,12 +448,14 @@ pub fn render_audio_unit(env: &mut Environment, audio_unit: AudioUnit) {
 
     env.mem.free(audio_buffer_list.cast_void());
 
-    // Reborrow as mutable to update the last render time
-    audio_components::State::get(&mut env.framework_state)
+    let audio_unit_host_object = audio_components::State::get(&mut env.framework_state)
         .audio_component_instances
         .get_mut(&audio_unit)
-        .unwrap()
-        .last_render_time = Some(now);
+        .unwrap();
+    // Reborrow as mutable to update the last render time
+
+    audio_unit_host_object.last_render_time = Some(now);
+    audio_unit_host_object.is_running_handler = false;
 }
 
 pub const FUNCTIONS: FunctionExports = &[

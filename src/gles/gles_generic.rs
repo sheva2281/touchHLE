@@ -81,6 +81,8 @@ pub trait GLES {
     unsafe fn FrontFace(&mut self, mode: GLenum);
     unsafe fn PolygonOffset(&mut self, factor: GLfloat, units: GLfloat);
     unsafe fn PolygonOffsetx(&mut self, factor: GLfixed, units: GLfixed);
+    unsafe fn SampleCoverage(&mut self, value: GLclampf, invert: GLboolean);
+    unsafe fn SampleCoveragex(&mut self, value: GLclampx, invert: GLboolean);
     unsafe fn ShadeModel(&mut self, mode: GLenum);
     unsafe fn Scissor(&mut self, x: GLint, y: GLint, width: GLsizei, height: GLsizei);
     unsafe fn Viewport(&mut self, x: GLint, y: GLint, width: GLsizei, height: GLsizei);
@@ -339,6 +341,8 @@ pub trait GLES {
     // OES_framebuffer_object (incomplete)
     unsafe fn GenFramebuffersOES(&mut self, n: GLsizei, framebuffers: *mut GLuint);
     unsafe fn GenRenderbuffersOES(&mut self, n: GLsizei, renderbuffers: *mut GLuint);
+    unsafe fn IsFramebufferOES(&mut self, framebuffer: GLuint) -> GLboolean;
+    unsafe fn IsRenderbufferOES(&mut self, renderbuffer: GLuint) -> GLboolean;
     unsafe fn BindFramebufferOES(&mut self, target: GLenum, framebuffer: GLuint);
     unsafe fn BindRenderbufferOES(&mut self, target: GLenum, renderbuffer: GLuint);
     unsafe fn RenderbufferStorageOES(

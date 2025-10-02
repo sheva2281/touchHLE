@@ -49,15 +49,22 @@ pub const CLASSES: ClassExports = objc_classes! {
     autorelease(env, new)
 }
 
-+ (id)setWithObjects:(id)first_obj, ...args {
-    let new: id = msg![env; this alloc];
-    env.objc.borrow_mut::<SetHostObject>(new).dict = set_from_objects(env, first_obj, args);
-    autorelease(env, new)
-}
-
 // NSCopying implementation
 - (id)copyWithZone:(NSZonePtr)_zone {
     retain(env, this)
+}
+
+- (bool)containsObject:(id)object {
+    let enumerator: id = msg![env; this objectEnumerator];
+    loop {
+        let next: id = msg![env; enumerator nextObject];
+        if next == nil {
+            return false;
+        }
+        if msg![env; next isEqual:object] {
+            return true;
+        }
+    }
 }
 
 @end
@@ -93,6 +100,12 @@ pub const CLASSES: ClassExports = objc_classes! {
         dict: Default::default(),
     });
     env.objc.alloc_object(this, host_object, &mut env.mem)
+}
+
++ (id)setWithObjects:(id)first_obj, ...args {
+    let new: id = msg![env; this alloc];
+    env.objc.borrow_mut::<SetHostObject>(new).dict = set_from_objects(env, first_obj, args);
+    autorelease(env, new)
 }
 
 - (id)initWithObject:(id)object {
@@ -171,6 +184,12 @@ pub const CLASSES: ClassExports = objc_classes! {
     env.objc.alloc_object(this, host_object, &mut env.mem)
 }
 
++ (id)setWithObjects:(id)first_obj, ...args {
+    let new: id = msg![env; this alloc];
+    env.objc.borrow_mut::<SetHostObject>(new).dict = set_from_objects(env, first_obj, args);
+    autorelease(env, new)
+}
+
 - (id)initWithObject:(id)object {
     let null: id = msg_class![env; NSNull null];
 
@@ -240,6 +259,12 @@ pub const CLASSES: ClassExports = objc_classes! {
     let null: id = msg_class![env; NSNull null];
     let mut host_obj: SetHostObject = std::mem::take(env.objc.borrow_mut(this));
     host_obj.dict.insert(env, object, null, /* copy_key: */ false);
+    *env.objc.borrow_mut(this) = host_obj;
+}
+
+- (())removeObject:(id)object {
+    let mut host_obj: SetHostObject = std::mem::take(env.objc.borrow_mut(this));
+    host_obj.dict.remove(env, object);
     *env.objc.borrow_mut(this) = host_obj;
 }
 

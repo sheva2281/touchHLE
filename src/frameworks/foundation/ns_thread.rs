@@ -24,6 +24,7 @@ use std::time::Duration;
 
 #[derive(Default)]
 pub struct State {
+    is_multi_threaded: bool,
     ns_threads: HashMap<pthread_t, id>,
 }
 impl State {
@@ -39,6 +40,7 @@ struct NSThreadHostObject {
     /// `NSMutableDictionary*`
     thread_dictionary: id,
     owned: bool,
+    finished: bool,
 }
 impl HostObject for NSThreadHostObject {}
 
@@ -55,8 +57,16 @@ pub const CLASSES: ClassExports = objc_classes! {
         object: nil,
         thread_dictionary: nil,
         owned: false,
+        finished: false,
     });
     env.objc.alloc_object(this, host_object, &mut env.mem)
+}
+
++ (bool)isMultiThreaded {
+    // Note: this doesn't account for non-Cocoa APIs,
+    // only for `detachNewThreadSelector:toTarget:withObject:` and
+    // `start` methods (according to the docs)
+    env.framework_state.foundation.ns_thread.is_multi_threaded
 }
 
 + (f64)threadPriority {
@@ -104,6 +114,9 @@ pub const CLASSES: ClassExports = objc_classes! {
     // We own this thread and need to release it after it's finished
     env.objc.borrow_mut::<NSThreadHostObject>(new).owned = true;
 
+    // redundant with `start`, but we do it for the sake of completeness
+    env.framework_state.foundation.ns_thread.is_multi_threaded = true;
+
     msg![env; new start]
 }
 
@@ -138,6 +151,7 @@ pub const CLASSES: ClassExports = objc_classes! {
     assert!(!State::get(env).ns_threads.contains_key(&pthread));
     State::get(env).ns_threads.insert(pthread, this);
 
+    env.framework_state.foundation.ns_thread.is_multi_threaded = true;
     // TODO: post NSWillBecomeMultiThreadedNotification
 }
 
@@ -177,6 +191,10 @@ pub const CLASSES: ClassExports = objc_classes! {
     true
 }
 
+- (bool)isFinished {
+    env.objc.borrow::<NSThreadHostObject>(this).finished
+}
+
 - (())dealloc {
     log_dbg!("[(NSThread*){:?} dealloc]", this);
     let host_object = env.objc.borrow::<NSThreadHostObject>(this);
@@ -200,6 +218,10 @@ pub fn _touchHLE_NSThreadInvocationHelper(env: &mut Environment, ns_thread_obj: 
     assert!(env.objc.class_is_subclass_of(class, thread_class));
 
     () = msg![env; ns_thread_obj main];
+
+    env.objc
+        .borrow_mut::<NSThreadHostObject>(ns_thread_obj)
+        .finished = true;
 
     let &NSThreadHostObject {
         target,

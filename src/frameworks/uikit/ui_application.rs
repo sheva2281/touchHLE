@@ -79,7 +79,9 @@ pub const CLASSES: ClassExports = objc_classes! {
     }
 }
 
-// TODO: statusBarHidden getter
+- (bool)isStatusBarHidden {
+    env.framework_state.uikit.ui_application.status_bar_hidden
+}
 - (())setStatusBarHidden:(bool)hidden {
     env.framework_state.uikit.ui_application.status_bar_hidden = hidden;
 }
@@ -146,14 +148,14 @@ pub const CLASSES: ClassExports = objc_classes! {
 }
 
 - (id)keyWindow {
-    // TODO: handle nil
-    let key_window = env
+    let Some(key_window) = env
         .framework_state
         .uikit
         .ui_view
         .ui_window
-        .key_window
-        .unwrap();
+        .key_window else {
+        return nil;
+    };
     assert!(env
         .framework_state
         .uikit
@@ -165,7 +167,7 @@ pub const CLASSES: ClassExports = objc_classes! {
 }
 
 - (id)windows {
-    log!("TODO: UIApplication's windows getter is returning only visible windows");
+    log_once!("TODO: UIApplication's windows getter is returning only visible windows");
     let visible_windows: Vec<id> = (*env
         .framework_state
         .uikit
@@ -183,6 +185,9 @@ pub const CLASSES: ClassExports = objc_classes! {
     log!("TODO: ignoring registerForRemoteNotificationTypes:{}", types);
 }
 
+- (NSInteger)applicationIconBadgeNumber {
+    0 // default value
+}
 - (())setApplicationIconBadgeNumber:(NSInteger)bn {
     log!("TODO: ignoring setApplicationIconBadgeNumber:{}", bn);
 }
@@ -254,6 +259,10 @@ pub(super) fn UIApplicationMain(
             }
         }
 
+        if env.bundle.status_bar_hidden() {
+            let _: () = msg![env; ui_application setStatusBarHidden:true];
+        }
+
         let delegate: id = msg![env; ui_application delegate];
         if delegate != nil {
             // The delegate was created while loading the nib file.
@@ -263,14 +272,18 @@ pub(super) fn UIApplicationMain(
                 .borrow_mut::<UIApplicationHostObject>(ui_application)
                 .delegate_is_retained = true;
             retain(env, delegate);
-        } else {
+        } else if delegate_class_name != nil {
             // We have to construct the delegate.
-            assert!(delegate_class_name != nil);
             let name = ns_string::to_rust_string(env, delegate_class_name);
             let class = env.objc.get_known_class(&name, &mut env.mem);
             let delegate: id = msg![env; class new];
             let _: () = msg![env; ui_application setDelegate:delegate];
             assert!(delegate != nil);
+        } else {
+            log!(
+                "Warning: No delegate found in main nib file and no delegate class name specified in Info.plist. \
+                 The app may not function correctly."
+            );
         };
         // We can't hang on to the delegate, the guest app may change it at any
         // time.
@@ -285,20 +298,29 @@ pub(super) fn UIApplicationMain(
         let delegate: id = msg![env; ui_application delegate];
         // iOS 3+ apps usually use application:didFinishLaunchingWithOptions:,
         // and it seems to be prioritized over applicationDidFinishLaunching:.
-        if env.objc.object_has_method_named(
-            &env.mem,
-            delegate,
-            "application:didFinishLaunchingWithOptions:",
-        ) {
-            let empty_dict: id = msg_class![env; NSDictionary dictionary];
-            () = msg![env; delegate application:ui_application didFinishLaunchingWithOptions:empty_dict];
-        } else if env.objc.object_has_method_named(
-            &env.mem,
-            delegate,
-            "applicationDidFinishLaunching:",
-        ) {
-            () = msg![env; delegate applicationDidFinishLaunching:ui_application];
+        if delegate != nil {
+            if env.objc.object_has_method_named(
+                &env.mem,
+                delegate,
+                "application:didFinishLaunchingWithOptions:",
+            ) {
+                let empty_dict: id = msg_class![env; NSDictionary dictionary];
+                () = msg![env; delegate application:ui_application didFinishLaunchingWithOptions:empty_dict];
+            } else if env.objc.object_has_method_named(
+                &env.mem,
+                delegate,
+                "applicationDidFinishLaunching:",
+            ) {
+                () = msg![env; delegate applicationDidFinishLaunching:ui_application];
+            }
+        } else {
+            log!("Warning: Skipping delegate launch methods because delegate is nil.");
         }
+
+        let center: id = msg_class![env; NSNotificationCenter defaultCenter];
+        let notif_name = get_static_str(env, UIApplicationDidFinishLaunchingNotification);
+        // TODO: launch options in `userInfo` if it'll ever become a concern
+        () = msg![env; center postNotificationName:notif_name object:ui_application userInfo:nil];
 
         let _: () = msg![env; pool drain];
     }
@@ -315,17 +337,21 @@ pub(super) fn UIApplicationMain(
     {
         let pool: id = msg_class![env; NSAutoreleasePool new];
         let delegate: id = msg![env; ui_application delegate];
-        if env
+        if delegate != nil && env
             .objc
             .object_has_method_named(&env.mem, delegate, "applicationDidBecomeActive:")
         {
             () = msg![env; delegate applicationDidBecomeActive:ui_application];
         }
+
+        let center: id = msg_class![env; NSNotificationCenter defaultCenter];
+        let notif_name = get_static_str(env, UIApplicationDidBecomeActiveNotification);
+        () = msg![env; center postNotificationName:notif_name object:ui_application userInfo:nil];
+
         let _: () = msg![env; pool drain];
     }
 
     // FIXME: There are more messages we should send.
-    // TODO: Send UIApplicationDidFinishLaunchingNotification?
 
     // TODO: It might be nicer to return from this function (even though it's
     // conceptually noreturn) and set some global flag that changes how the
@@ -340,7 +366,7 @@ pub(super) fn UIApplicationMain(
 pub(super) fn exit(env: &mut Environment) {
     let ui_application: id = msg_class![env; UIApplication sharedApplication];
 
-    // TODO: send notifications also
+    let center: id = msg_class![env; NSNotificationCenter defaultCenter];
 
     {
         let pool: id = msg_class![env; NSAutoreleasePool new];
@@ -357,12 +383,15 @@ pub(super) fn exit(env: &mut Environment) {
         }
 
         let delegate: id = msg![env; ui_application delegate];
-        if env
+        if delegate != nil && env
             .objc
             .object_has_method_named(&env.mem, delegate, "applicationWillResignActive:")
         {
             () = msg![env; delegate applicationWillResignActive:ui_application];
         }
+
+        let notif_name = get_static_str(env, UIApplicationWillResignActiveNotification);
+        () = msg![env; center postNotificationName:notif_name object:ui_application userInfo:nil];
 
         let _: () = msg![env; pool drain];
     };
@@ -370,28 +399,65 @@ pub(super) fn exit(env: &mut Environment) {
     {
         let pool: id = msg_class![env; NSAutoreleasePool new];
         let delegate: id = msg![env; ui_application delegate];
-        if env
+        if delegate != nil && env
             .objc
             .object_has_method_named(&env.mem, delegate, "applicationWillTerminate:")
         {
             () = msg![env; delegate applicationWillTerminate:ui_application];
         }
+
+        let notif_name = get_static_str(env, UIApplicationWillTerminateNotification);
+        () = msg![env; center postNotificationName:notif_name object:ui_application userInfo:nil];
+
         let _: () = msg![env; pool drain];
     };
 
     std::process::exit(0);
 }
 
-pub const UIApplicationDidReceiveMemoryWarningNotification: &str =
-    "UIApplicationDidReceiveMemoryWarningNotification";
-pub const UIApplicationLaunchOptionsRemoteNotificationKey: &str =
-    "UIApplicationLaunchOptionsRemoteNotificationKey";
-pub const UIApplicationDidEnterBackgroundNotification: &str =
+/// App life-cycle notifications
+const UIApplicationDidFinishLaunchingNotification: &str =
+    "UIApplicationDidFinishLaunchingNotification";
+const UIApplicationDidBecomeActiveNotification: &str = "UIApplicationDidBecomeActiveNotification";
+const UIApplicationDidEnterBackgroundNotification: &str =
     "UIApplicationDidEnterBackgroundNotification";
+const UIApplicationWillEnterForegroundNotification: &str =
+    "UIApplicationWillEnterForegroundNotification";
+const UIApplicationWillResignActiveNotification: &str = "UIApplicationWillResignActiveNotification";
+const UIApplicationWillTerminateNotification: &str = "UIApplicationWillTerminateNotification";
+/// Other app notifications
+const UIApplicationLaunchOptionsRemoteNotificationKey: &str =
+    "UIApplicationLaunchOptionsRemoteNotificationKey";
+const UIApplicationDidReceiveMemoryWarningNotification: &str =
+    "UIApplicationDidReceiveMemoryWarningNotification";
 
 /// `UIApplicationLaunchOptionsKey` and `NSNotificationName` values.
 /// (Both types are strings)
 pub const CONSTANTS: ConstantExports = &[
+    (
+        "_UIApplicationDidFinishLaunchingNotification",
+        HostConstant::NSString(UIApplicationDidFinishLaunchingNotification),
+    ),
+    (
+        "_UIApplicationDidBecomeActiveNotification",
+        HostConstant::NSString(UIApplicationDidBecomeActiveNotification),
+    ),
+    (
+        "_UIApplicationDidEnterBackgroundNotification",
+        HostConstant::NSString(UIApplicationDidEnterBackgroundNotification),
+    ),
+    (
+        "_UIApplicationWillEnterForegroundNotification",
+        HostConstant::NSString(UIApplicationWillEnterForegroundNotification),
+    ),
+    (
+        "_UIApplicationWillResignActiveNotification",
+        HostConstant::NSString(UIApplicationWillResignActiveNotification),
+    ),
+    (
+        "_UIApplicationWillTerminateNotification",
+        HostConstant::NSString(UIApplicationWillTerminateNotification),
+    ),
     (
         "_UIApplicationDidReceiveMemoryWarningNotification",
         HostConstant::NSString(UIApplicationDidReceiveMemoryWarningNotification),
@@ -399,10 +465,6 @@ pub const CONSTANTS: ConstantExports = &[
     (
         "_UIApplicationLaunchOptionsRemoteNotificationKey",
         HostConstant::NSString(UIApplicationLaunchOptionsRemoteNotificationKey),
-    ),
-    (
-        "_UIApplicationDidEnterBackgroundNotification",
-        HostConstant::NSString(UIApplicationDidEnterBackgroundNotification),
     ),
 ];
 

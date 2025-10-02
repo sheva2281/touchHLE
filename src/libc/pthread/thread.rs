@@ -8,8 +8,9 @@
 use crate::abi::GuestFunction;
 use crate::dyld::{export_c_func, FunctionExports};
 use crate::libc::errno::{EDEADLK, EINVAL, ESRCH};
-use crate::libc::mach_host::PAGE_SIZE;
-use crate::mem::{self, ConstPtr, ConstVoidPtr, GuestUSize, MutPtr, MutVoidPtr, SafeRead};
+use crate::mem::{
+    self, ConstPtr, ConstVoidPtr, GuestUSize, MutPtr, MutVoidPtr, SafeRead, PAGE_SIZE,
+};
 use crate::{Environment, ThreadId};
 use std::collections::HashMap;
 
@@ -109,7 +110,7 @@ pub fn pthread_attr_setstacksize(
     attr: MutPtr<pthread_attr_t>,
     stacksize: GuestUSize,
 ) -> i32 {
-    if attr.is_null() || stacksize < PTHREAD_STACK_MIN || stacksize % PAGE_SIZE != 0 {
+    if attr.is_null() || stacksize < PTHREAD_STACK_MIN || !stacksize.is_multiple_of(PAGE_SIZE) {
         return EINVAL;
     }
     check_magic!(env, attr, MAGIC_ATTR);

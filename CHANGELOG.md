@@ -49,12 +49,22 @@ Compatibility:
   - [Crusade Of Destiny](https://appdb.touchhle.org/apps/792) (@ciciplusplus)
   - [Arvale](https://appdb.touchhle.org/apps/671) (@ciciplusplus)
   - [Battlefield: Bad Company 2](https://appdb.touchhle.org/apps/817) (@ciciplusplus)
+  - [Ms. PAC-MAN](https://appdb.touchhle.org/apps/63) (@acieslewicz)
+  - [Dark Nebula](https://appdb.touchhle.org/apps/910) (@ciciplusplus)
+  - [FIFA 10](https://appdb.touchhle.org/apps/496) (@ciciplusplus)
+  - [Crash Bandicoot Nitro Kart 2](https://appdb.touchhle.org/apps/670) (@ciciplusplus)
+  - [Driver](https://appdb.touchhle.org/apps/247) (@ciciplusplus)
+  - [Sacred Odyssey: Rise of Ayden](https://appdb.touchhle.org/apps/431) (@ciciplusplus)
+  - [Nanosaur 2](https://appdb.touchhle.org/apps/991) (@ciciplusplus)
+  - [Cro-Mag Rally](https://appdb.touchhle.org/apps/992) (@ciciplusplus)
+  - [Bugdom 2](https://appdb.touchhle.org/apps/995) (@ciciplusplus)
 - API support improvements:
-  - Various small contributions. (@hikari-no-yume, @alborrajo, @ciciplusplus, @atasro2, @abnormalmaps, @hujerhoe, @acieslewicz, @WhatAmISupposedToPutHere, @JaGoTu, @apexad, @chyyran, @mistydemeo)
+  - Various small contributions. (@hikari-no-yume, @alborrajo, @ciciplusplus, @atasro2, @abnormalmaps, @hujerhoe, @acieslewicz, @WhatAmISupposedToPutHere, @JaGoTu, @apexad, @chyyran, @mistydemeo, @bognarit80)
   - UITextField now supports real text input with a keyboard. On Windows/macOS physical keyboard is used, on Android it's done via a system soft keyboard. (@ciciplusplus)
   - UIScrollView and UITextView partial implementations. (@Skryptonyte, @ciciplusplus)
   - The libz dynamic library is now available, [compiled from source](https://github.com/touchHLE/zlib-dylib) using a [clean open-source toolchain](https://github.com/touchHLE/common-3.0-sdk). (@acieslewicz)
   - ALAC and Microsoft IMA ADPCM are now supported in Audio Toolbox, with the same caveats as other compressed codecs. (@abnormalmaps)
+  - Improved compatibility for iOS 3.1+ apps. (@bognarit80)
 
 Usability:
 
@@ -73,6 +83,8 @@ Quality:
 
 - Fixed an issue on some Android phones where the accelerometer was not usable. (@Oscar1640)
 - Fixed multi-touch in some games. (@ciciplusplus)
+- App icons are now displayed with a glossy sheen where required. (@hikari-no-yume)
+- The app icons and labels in the app picker are now displayed at integer pixel offsets, making them sharper and more symmetrical. (@hikari-no-yume)
 
 Other:
 

@@ -124,6 +124,13 @@ impl Bundle {
         }
     }
 
+    pub fn status_bar_hidden(&self) -> bool {
+        self.plist
+            .get("UIStatusBarHidden")
+            .and_then(|v| v.as_boolean())
+            .unwrap_or(false)
+    }
+
     fn icon_path(&self) -> GuestPathBuf {
         if let Some(filename) = self.plist.get("CFBundleIconFile") {
             if filename
@@ -142,19 +149,29 @@ impl Bundle {
         }
     }
 
-    /// Load icon and round off its corners for display.
+    /// Load icon and round off its corners (and add sheen if needed) for
+    /// display.
     pub fn load_icon(&self, fs: &Fs) -> Result<Image, String> {
         let bytes = fs
             .read(self.icon_path())
             .map_err(|_| "Could not read icon file".to_string())?;
         let mut image =
             Image::from_bytes(&bytes).map_err(|e| format!("Could not parse icon image: {e}"))?;
+        // UIPrerenderedIcon is used to avoid iOS applying a sheen effect,
+        // should be boolean, but some apps use a string, so we check both.
+        // See https://developer.apple.com/library/archive/qa/qa1614/_index.html
+        // Default if it does not exist is NO/false.
+        let add_sheen = !self
+            .plist
+            .get("UIPrerenderedIcon")
+            .and_then(|v| v.as_boolean().or(v.as_string().map(|s| s == "YES")))
+            .unwrap_or(false);
         // iPhone OS icons are 57px by 57px and the OS always applies a
         // 10px radius rounded corner (see e.g. documentation of
         // UIPrerenderedIcon). If the icon is larger for some reason,
         // let's scale to match.
         let corner_radius = (10.0 / 57.0) * (image.dimensions().0 as f32);
-        image.round_corners(corner_radius);
+        image.round_corners(corner_radius, /* four_corners: */ true, add_sheen);
         Ok(image)
     }
 

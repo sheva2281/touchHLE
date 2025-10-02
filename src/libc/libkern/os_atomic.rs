@@ -13,8 +13,12 @@
 
 use crate::dyld::FunctionExports;
 use crate::export_c_func;
-use crate::mem::MutPtr;
+use crate::mem::{MutPtr, MutVoidPtr};
 use crate::Environment;
+
+fn OSAtomicAdd32(env: &mut Environment, amount: i32, value_ptr: MutPtr<i32>) -> i32 {
+    OSAtomicAdd32Barrier(env, amount, value_ptr)
+}
 
 fn OSAtomicAdd32Barrier(env: &mut Environment, the_amount: i32, the_value: MutPtr<i32>) -> i32 {
     let curr = env.mem.read(the_value);
@@ -24,6 +28,15 @@ fn OSAtomicAdd32Barrier(env: &mut Environment, the_amount: i32, the_value: MutPt
 }
 
 fn OSAtomicCompareAndSwap32(
+    env: &mut Environment,
+    old_value: i32,
+    new_value: i32,
+    the_value: MutPtr<i32>,
+) -> bool {
+    OSAtomicCompareAndSwap32Barrier(env, old_value, new_value, the_value)
+}
+
+fn OSAtomicCompareAndSwapIntBarrier(
     env: &mut Environment,
     old_value: i32,
     new_value: i32,
@@ -46,8 +59,25 @@ fn OSAtomicCompareAndSwap32Barrier(
     }
 }
 
+fn OSAtomicCompareAndSwapPtrBarrier(
+    env: &mut Environment,
+    old_value: MutVoidPtr,
+    new_value: MutVoidPtr,
+    the_value: MutPtr<MutVoidPtr>,
+) -> bool {
+    if old_value == env.mem.read(the_value) {
+        env.mem.write(the_value, new_value);
+        true
+    } else {
+        false
+    }
+}
+
 pub const FUNCTIONS: FunctionExports = &[
+    export_c_func!(OSAtomicAdd32(_, _)),
     export_c_func!(OSAtomicAdd32Barrier(_, _)),
     export_c_func!(OSAtomicCompareAndSwap32(_, _, _)),
+    export_c_func!(OSAtomicCompareAndSwapIntBarrier(_, _, _)),
     export_c_func!(OSAtomicCompareAndSwap32Barrier(_, _, _)),
+    export_c_func!(OSAtomicCompareAndSwapPtrBarrier(_, _, _)),
 ];

@@ -10,10 +10,11 @@
 
 use super::cf_allocator::{kCFAllocatorDefault, CFAllocatorRef};
 use super::cf_dictionary::CFDictionaryRef;
+use super::cf_locale::CFLocaleRef;
+use super::{kCFNotFound, CFComparisonResult, CFIndex, CFOptionFlags, CFRange};
 use crate::abi::{DotDotDot, VaList};
 use crate::dyld::{export_c_func, FunctionExports};
-use crate::frameworks::core_foundation::{kCFNotFound, CFIndex, CFOptionFlags, CFRange};
-use crate::frameworks::foundation::{ns_string, NSNotFound, NSRange, NSUInteger};
+use crate::frameworks::foundation::{ns_string, unichar, NSNotFound, NSRange, NSUInteger};
 use crate::mem::{ConstPtr, MutPtr};
 use crate::objc::{id, msg, msg_class};
 use crate::Environment;
@@ -29,6 +30,27 @@ pub const kCFStringEncodingUnicode: CFStringEncoding = 0x100;
 pub const kCFStringEncodingUTF16: CFStringEncoding = kCFStringEncodingUnicode;
 pub const kCFStringEncodingUTF16BE: CFStringEncoding = 0x10000100;
 pub const kCFStringEncodingUTF16LE: CFStringEncoding = 0x14000100;
+pub const kCFStringEncodingISOLatin1: CFStringEncoding = 0x0201;
+
+fn CFStringAppend(
+    env: &mut Environment,
+    the_string: CFMutableStringRef,
+    appended_string: CFStringRef,
+) {
+    msg![env; the_string appendString:appended_string]
+}
+
+fn CFStringAppendCString(
+    env: &mut Environment,
+    string: CFMutableStringRef,
+    c_string: ConstPtr<u8>,
+    encoding: CFStringEncoding,
+) {
+    let encoding = CFStringConvertEncodingToNSStringEncoding(env, encoding);
+    // TODO: avoid copying
+    let to_append: id = msg_class![env; NSString stringWithCString:c_string encoding:encoding];
+    msg![env; string appendString:to_append]
+}
 
 fn CFStringAppendFormat(
     env: &mut Environment,
@@ -43,7 +65,7 @@ fn CFStringAppendFormat(
     msg![env; string appendString:to_append]
 }
 
-fn CFStringConvertEncodingToNSStringEncoding(
+pub fn CFStringConvertEncodingToNSStringEncoding(
     _env: &mut Environment,
     encoding: CFStringEncoding,
 ) -> ns_string::NSStringEncoding {
@@ -54,6 +76,7 @@ fn CFStringConvertEncodingToNSStringEncoding(
         kCFStringEncodingUTF16 => ns_string::NSUTF16StringEncoding,
         kCFStringEncodingUTF16BE => ns_string::NSUTF16BigEndianStringEncoding,
         kCFStringEncodingUTF16LE => ns_string::NSUTF16LittleEndianStringEncoding,
+        kCFStringEncodingISOLatin1 => ns_string::NSISOLatin1StringEncoding,
         _ => unimplemented!("Unhandled: CFStringEncoding {:#x}", encoding),
     }
 }
@@ -68,8 +91,18 @@ fn CFStringConvertNSStringEncodingToEncoding(
         ns_string::NSUTF16StringEncoding => kCFStringEncodingUTF16,
         ns_string::NSUTF16BigEndianStringEncoding => kCFStringEncodingUTF16BE,
         ns_string::NSUTF16LittleEndianStringEncoding => kCFStringEncodingUTF16LE,
+        ns_string::NSISOLatin1StringEncoding => kCFStringEncodingISOLatin1,
         _ => unimplemented!("Unhandled: NSStringEncoding {:#x}", encoding),
     }
+}
+
+fn CFStringCreateCopy(
+    env: &mut Environment,
+    allocator: CFAllocatorRef,
+    the_string: CFStringRef,
+) -> CFStringRef {
+    assert_eq!(allocator, kCFAllocatorDefault); // unimplemented
+    msg![env; the_string copy]
 }
 
 fn CFStringCreateMutable(
@@ -79,8 +112,34 @@ fn CFStringCreateMutable(
 ) -> CFMutableStringRef {
     assert_eq!(allocator, kCFAllocatorDefault); // unimplemented
     assert_eq!(max_length, 0);
-    let str: id = msg_class![env; NSMutableString alloc];
-    msg![env; str init]
+    msg_class![env; NSMutableString new]
+}
+
+fn CFStringCreateMutableCopy(
+    env: &mut Environment,
+    allocator: CFAllocatorRef,
+    max_length: CFIndex,
+    the_string: CFStringRef,
+) -> CFMutableStringRef {
+    assert_eq!(allocator, kCFAllocatorDefault); // unimplemented
+    assert_eq!(max_length, 0);
+    msg![env; the_string mutableCopy]
+}
+
+fn CFStringCreateWithBytes(
+    env: &mut Environment,
+    allocator: CFAllocatorRef,
+    bytes: ConstPtr<u8>,
+    num_bytes: CFIndex,
+    encoding: CFStringEncoding,
+    is_external: bool,
+) -> CFStringRef {
+    assert_eq!(allocator, kCFAllocatorDefault); // unimplemented
+    assert!(!is_external); // TODO
+    let encoding = CFStringConvertEncodingToNSStringEncoding(env, encoding);
+    let length: NSUInteger = num_bytes.try_into().unwrap();
+    let ns_string: id = msg_class![env; NSString alloc];
+    msg![env; ns_string initWithBytes:bytes length:length encoding:encoding]
 }
 
 fn CFStringCreateWithCString(
@@ -118,7 +177,6 @@ fn CFStringCreateWithFormatAndArguments(
     ns_string::from_rust_string(env, res)
 }
 
-pub type CFComparisonResult = CFIndex;
 pub type CFStringCompareFlags = CFOptionFlags;
 
 fn CFStringCompare(
@@ -130,6 +188,51 @@ fn CFStringCompare(
     msg![env; a compare:b options:flags]
 }
 
+fn CFStringCompareWithOptions(
+    env: &mut Environment,
+    a: CFStringRef,
+    b: CFStringRef,
+    range: CFRange,
+    flags: CFStringCompareFlags,
+) -> CFComparisonResult {
+    let range = NSRange {
+        location: range.location.try_into().unwrap(),
+        length: range.length.try_into().unwrap(),
+    };
+    // TODO: avoid copying
+    let a_sub: id = msg![env; a substringWithRange:range];
+    msg![env; a_sub compare:b options:flags]
+}
+
+fn CFStringDelete(env: &mut Environment, string: CFMutableStringRef, range: CFRange) {
+    let range = NSRange {
+        location: range.location.try_into().unwrap(),
+        length: range.length.try_into().unwrap(),
+    };
+    msg![env; string deleteCharactersInRange:range]
+}
+
+fn CFStringGetCharacterAtIndex(
+    env: &mut Environment,
+    the_string: CFStringRef,
+    idx: CFIndex,
+) -> unichar {
+    let idx: NSUInteger = idx.try_into().unwrap();
+    msg![env; the_string characterAtIndex:idx]
+}
+
+fn CFStringGetCharacters(
+    env: &mut Environment,
+    string: CFStringRef,
+    range: CFRange,
+    buffer: MutPtr<unichar>,
+) {
+    let range = NSRange {
+        location: range.location.try_into().unwrap(),
+        length: range.length.try_into().unwrap(),
+    };
+    msg![env; string getCharacters:buffer range:range]
+}
 fn CFStringGetCStringPtr(
     env: &mut Environment,
     the_string: CFStringRef,
@@ -156,6 +259,11 @@ fn CFStringGetLength(env: &mut Environment, the_string: CFStringRef) -> CFIndex 
     length.try_into().unwrap()
 }
 
+fn CFStringGetIntValue(env: &mut Environment, string: CFStringRef) -> i32 {
+    // TODO: check for allowed characters
+    msg![env; string intValue]
+}
+
 fn CFStringFind(
     env: &mut Environment,
     string: CFStringRef,
@@ -175,17 +283,87 @@ fn CFStringFind(
     }
 }
 
+fn CFStringHasSuffix(env: &mut Environment, the_string: CFStringRef, suffix: CFStringRef) -> bool {
+    msg![env; the_string hasSuffix:suffix]
+}
+
+fn CFStringUppercase(env: &mut Environment, string: CFStringRef, _locale: CFLocaleRef) {
+    // TODO: account for locale
+    let uppercase: id = msg![env; string uppercaseString];
+    msg![env; string setString:uppercase]
+}
+
+type ConstStr255Param = ConstPtr<u8>;
+type StringPtr = MutPtr<u8>;
+
+fn CFStringCreateWithPascalString(
+    env: &mut Environment,
+    allocator: CFAllocatorRef,
+    p_str: ConstStr255Param,
+    encoding: CFStringEncoding,
+) -> CFStringRef {
+    let len: CFIndex = env.mem.read(p_str).into();
+    let res = CFStringCreateWithBytes(env, allocator, p_str + 1, len, encoding, false);
+    assert_eq!(len, CFStringGetLength(env, res));
+    log_dbg!(
+        "CFStringCreateWithPascalString('{}')",
+        ns_string::to_rust_string(env, res)
+    );
+    res
+}
+
+fn CFStringGetPascalString(
+    env: &mut Environment,
+    the_string: CFStringRef,
+    buffer: StringPtr,
+    buffer_size: CFIndex,
+    encoding: CFStringEncoding,
+) -> bool {
+    log_dbg!(
+        "CFStringGetPascalString('{}')",
+        ns_string::to_rust_string(env, the_string)
+    );
+    let len = CFStringGetLength(env, the_string);
+    // first byte of Pascal string is length
+    assert!((len + 1) <= buffer_size);
+    let len_char: u8 = len.try_into().unwrap();
+    env.mem.write(buffer, len_char);
+    let encoding = CFStringConvertEncodingToNSStringEncoding(env, encoding);
+    ns_string::get_bytes_buffer_inner(
+        env,
+        the_string,
+        buffer + 1,
+        len_char.into(),
+        encoding,
+        false,
+    )
+}
+
 pub const FUNCTIONS: FunctionExports = &[
+    export_c_func!(CFStringAppend(_, _)),
+    export_c_func!(CFStringAppendCString(_, _, _)),
     export_c_func!(CFStringAppendFormat(_, _, _, _)),
     export_c_func!(CFStringConvertEncodingToNSStringEncoding(_)),
     export_c_func!(CFStringConvertNSStringEncodingToEncoding(_)),
+    export_c_func!(CFStringCreateCopy(_, _)),
     export_c_func!(CFStringCreateMutable(_, _)),
+    export_c_func!(CFStringCreateMutableCopy(_, _, _)),
+    export_c_func!(CFStringCreateWithBytes(_, _, _, _, _)),
     export_c_func!(CFStringCreateWithCString(_, _, _)),
     export_c_func!(CFStringCreateWithFormat(_, _, _, _)),
     export_c_func!(CFStringCreateWithFormatAndArguments(_, _, _, _)),
     export_c_func!(CFStringCompare(_, _, _)),
+    export_c_func!(CFStringCompareWithOptions(_, _, _, _)),
+    export_c_func!(CFStringDelete(_, _)),
+    export_c_func!(CFStringGetCharacterAtIndex(_, _)),
+    export_c_func!(CFStringGetCharacters(_, _, _)),
     export_c_func!(CFStringGetCStringPtr(_, _)),
     export_c_func!(CFStringGetCString(_, _, _, _)),
+    export_c_func!(CFStringGetIntValue(_)),
     export_c_func!(CFStringGetLength(_)),
     export_c_func!(CFStringFind(_, _, _)),
+    export_c_func!(CFStringHasSuffix(_, _)),
+    export_c_func!(CFStringUppercase(_, _)),
+    export_c_func!(CFStringCreateWithPascalString(_, _, _)),
+    export_c_func!(CFStringGetPascalString(_, _, _, _)),
 ];

@@ -386,8 +386,14 @@ impl GuestFile {
         match self {
             GuestFile::File(file) => file.sync_all(),
             GuestFile::IpaBundleFile(_) | GuestFile::ResourceFile(_) => Ok(()),
-            GuestFile::Directory => panic!("Attempt to sync a directory as a guest file"),
-            _ => unimplemented!(),
+            GuestFile::Directory => {
+                log!("Warning: syncing directory as a guest file.");
+                Ok(())
+            }
+            GuestFile::Socket => Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "Sync operation not supported on socket",
+            )),
         }
     }
     pub fn set_len(&self, len: u64) -> std::io::Result<()> {
@@ -402,6 +408,20 @@ impl GuestFile {
             GuestFile::Directory => panic!("Attempt to resize a directory as a guest file"),
             _ => unimplemented!(),
         }
+    }
+
+    pub fn stream_len(&mut self) -> std::io::Result<u64> {
+        // TODO: Remove if standard stream_len ever gets stabilized.
+        let old_position = self.stream_position()?;
+        let len = self.seek(std::io::SeekFrom::End(0))?;
+        self.seek(std::io::SeekFrom::Start(old_position))?;
+        Ok(len)
+    }
+
+    pub fn is_seekable(&self) -> bool {
+        // Due to legacy directory iteration support, directories are seekable
+        // https://stackoverflow.com/questions/65911066/what-does-lseek-mean-for-a-directory-file-descriptor
+        !matches!(self, GuestFile::Socket)
     }
 }
 

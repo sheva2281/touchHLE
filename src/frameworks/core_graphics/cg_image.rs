@@ -5,7 +5,9 @@
  */
 //! `CGImage.h`
 
-use super::cg_color_space::{kCGColorSpaceGenericRGB, CGColorSpaceCreateWithName, CGColorSpaceRef};
+use super::cg_color_space::{
+    kCGColorSpaceGenericRGB, CGColorSpaceCreateWithName, CGColorSpaceGetModel, CGColorSpaceRef,
+};
 use super::cg_data_provider::{self, CGDataProviderRef};
 use super::CGFloat;
 use crate::dyld::{export_c_func, FunctionExports};
@@ -95,6 +97,21 @@ pub fn borrow_image_mut(objc: &mut ObjC, image: CGImageRef) -> &mut Image {
 
 // TODO: More create methods.
 
+fn CGImageCreateCopyWithColorSpace(
+    env: &mut Environment,
+    image: CGImageRef,
+    color_space: CGColorSpaceRef,
+) -> CGImageRef {
+    let image_color_space = CGImageGetColorSpace(env, image);
+    assert_eq!(
+        CGColorSpaceGetModel(env, image_color_space),
+        CGColorSpaceGetModel(env, color_space)
+    );
+    // If color space matches, we could just create a copy.
+    let new_image = env.objc.borrow::<CGImageHostObject>(image).image.clone();
+    from_image(env, new_image)
+}
+
 fn CGImageCreateWithPNGDataProvider(
     env: &mut Environment,
     source: CGDataProviderRef,
@@ -103,6 +120,24 @@ fn CGImageCreateWithPNGDataProvider(
     _intent: i32,              // TODO (should be CGColorRenderingIntent)
 ) -> CGImageRef {
     assert!(decode.is_null()); // TODO
+
+    let bytes = cg_data_provider::borrow_bytes(env, source);
+    let Ok(image) = Image::from_bytes(bytes) else {
+        // Docs don't say what happens on failure, but this would make sense.
+        return nil;
+    };
+
+    from_image(env, image)
+}
+
+fn CGImageCreateWithJPEGDataProvider(
+    env: &mut Environment,
+    source: CGDataProviderRef,
+    decode: ConstPtr<CGFloat>,
+    _should_interpolate: bool, // TODO
+    _intent: i32,              // TODO (should be CGColorRenderingIntent)
+) -> CGImageRef {
+    assert!(decode.is_null());
 
     let bytes = cg_data_provider::borrow_bytes(env, source);
     let Ok(image) = Image::from_bytes(bytes) else {
@@ -147,6 +182,14 @@ pub fn CGImageGetHeight(env: &mut Environment, image: CGImageRef) -> GuestUSize 
 fn CGImageGetBitsPerPixel(_env: &mut Environment, _image: CGImageRef) -> GuestUSize {
     32
 }
+fn CGImageGetBytesPerRow(env: &mut Environment, image: CGImageRef) -> GuestUSize {
+    let (width, _height) = env
+        .objc
+        .borrow::<CGImageHostObject>(image)
+        .image
+        .dimensions();
+    width * 4
+}
 
 fn CGImageGetDataProvider(env: &mut Environment, image: CGImageRef) -> CGDataProviderRef {
     // CGImageGetDataProvider() seems to be intended to return the underlying
@@ -167,12 +210,15 @@ fn CGImageGetBitsPerComponent(_: &mut Environment, _: CGImageRef) -> GuestUSize 
 pub const FUNCTIONS: FunctionExports = &[
     export_c_func!(CGImageRelease(_)),
     export_c_func!(CGImageRetain(_)),
+    export_c_func!(CGImageCreateCopyWithColorSpace(_, _)),
     export_c_func!(CGImageCreateWithPNGDataProvider(_, _, _, _)),
+    export_c_func!(CGImageCreateWithJPEGDataProvider(_, _, _, _)),
     export_c_func!(CGImageGetAlphaInfo(_)),
     export_c_func!(CGImageGetColorSpace(_)),
     export_c_func!(CGImageGetWidth(_)),
     export_c_func!(CGImageGetHeight(_)),
     export_c_func!(CGImageGetBitsPerPixel(_)),
+    export_c_func!(CGImageGetBytesPerRow(_)),
     export_c_func!(CGImageGetDataProvider(_)),
     export_c_func!(CGImageGetBitsPerComponent(_)),
 ];
