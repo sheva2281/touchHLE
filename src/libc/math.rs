@@ -1473,6 +1473,7 @@ pub const FUNCTIONS: FunctionExports = &[
     export_c_func!(roundf(_)),
     export_c_func!(trunc(_)),
     export_c_func!(truncf(_)),
+    export_c_func!(modf(_, _)),
     export_c_func!(modff(_, _)),
     export_c_func!(lrint(_)),
     export_c_func!(lrintf(_)),
