@@ -107,6 +107,10 @@ pub fn find_fullscreen_eagl_layer(env: &mut Environment) -> id {
             return nil;
         }
 
+        // TODO: support affine transforms that result in a full-screen
+            //       layer (typical example is 90° rotation).
+            || !layer_host_obj.affine_transform.is_identity()
+        
         if let Some(&next) = layer_host_obj.sublayers.last() {
             layer = next;
         } else {
